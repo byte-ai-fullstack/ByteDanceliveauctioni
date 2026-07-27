@@ -77,22 +77,28 @@ produce_marker_eventually() {
 
 assert_kafka_markers() {
   local consumer_log
+  local attempt
   consumer_log="$(mktemp)"
-  "${compose[@]}" exec -T kafka-3 \
-    /opt/kafka/bin/kafka-console-consumer.sh \
-    --bootstrap-server 127.0.0.1:9092 \
-    --topic auction.dlq.v1 \
-    --from-beginning \
-    --timeout-ms 10000 \
-    --property print.key=true \
-    --property key.separator=: >"$consumer_log" 2>&1 || true
-  if ! rg -Fq "$drill_id:baseline" "$consumer_log" || ! rg -Fq "$drill_id:one-broker-down" "$consumer_log"; then
-    echo "Kafka failover did not retain both acknowledged drill records" >&2
-    sed -n '1,80p' "$consumer_log" >&2
-    rm -f "$consumer_log"
-    return 1
-  fi
+  for attempt in $(seq 1 "${L2_HA_CONSUMER_ATTEMPTS:-6}"); do
+    : >"$consumer_log"
+    "${compose[@]}" exec -T kafka-3 \
+      /opt/kafka/bin/kafka-console-consumer.sh \
+      --bootstrap-server 127.0.0.1:9092 \
+      --topic auction.dlq.v1 \
+      --from-beginning \
+      --timeout-ms "${L2_HA_CONSUMER_TIMEOUT_MS:-10000}" \
+      --property print.key=true \
+      --property key.separator=: >"$consumer_log" 2>&1 || true
+    if rg -Fq "$drill_id:baseline" "$consumer_log" && rg -Fq "$drill_id:one-broker-down" "$consumer_log"; then
+      rm -f "$consumer_log"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Kafka failover did not retain both acknowledged drill records after bounded recovery retries" >&2
+  sed -n '1,80p' "$consumer_log" >&2
   rm -f "$consumer_log"
+  return 1
 }
 
 sentinel_master() {
