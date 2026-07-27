@@ -2,6 +2,8 @@ name: public-monorepo-ci
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -121,6 +123,8 @@ jobs:
   pc-frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
     defaults:
       run:
         working-directory: live-auction-bid-frontend
