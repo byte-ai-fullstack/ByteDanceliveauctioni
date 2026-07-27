@@ -104,13 +104,16 @@ func SnapshotForViewer(snapshot *v1.RoomSnapshot, viewer LotResultViewer) *v1.Ro
 	return cloned
 }
 
-func EventForViewer(event v1.AuctionEvent, viewer LotResultViewer) v1.AuctionEvent {
+func EventForViewer(event *v1.AuctionEvent, viewer LotResultViewer) *v1.AuctionEvent {
+	if event == nil {
+		return nil
+	}
 	if viewer.CanViewMainAccountPrivate(event.GetMainAccountId()) {
 		return event
 	}
-	cloned := proto.Clone(&event).(*v1.AuctionEvent)
+	cloned := proto.Clone(event).(*v1.AuctionEvent)
 	RedactEventForViewer(cloned, viewerForMainAccount(viewer, event.GetMainAccountId()))
-	return *cloned
+	return cloned
 }
 
 func RedactEventForViewer(event *v1.AuctionEvent, viewer LotResultViewer) {

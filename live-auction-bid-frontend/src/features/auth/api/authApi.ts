@@ -3,13 +3,9 @@ import { normalizeAuthTokens, normalizeUser } from '../../../shared/api/normaliz
 import { assertOkResult } from '../../../shared/api/result';
 import { authSession } from '../../../shared/auth/authSession';
 import { canAccessBackoffice } from '../../../shared/api/types';
-import type { AuthTokens, GetMeReply, LoginReply, LogoutReply, RegisterMerchantReply, ResetPasswordReply, User } from '../../../shared/api/types';
+import type { GetMeReply, LoginReply, LogoutReply, RegisterMerchantReply, ResetPasswordReply, User } from '../../../shared/api/types';
 
 const BACKOFFICE_ACCESS_DENIED_MESSAGE = '该账号无后台访问权限';
-
-export async function refreshAccessToken(): Promise<AuthTokens | null> {
-  return authSession.refreshOnce();
-}
 
 export function currentAuth() {
   return authSession.current();

@@ -24,6 +24,7 @@ type AuctionRoomStateModel struct {
 	RoomID            string `gorm:"column:room_id;type:varchar(64);primaryKey"`
 	MainAccountID     string `gorm:"column:main_account_id;type:varchar(64);not null;index:idx_room_state_main"`
 	ActiveLotID       string `gorm:"column:active_lot_id;type:varchar(64);not null;default:''"`
+	DisplayLotID      string `gorm:"column:display_lot_id;type:varchar(64);not null;default:''"`
 	ActiveLotVersion  int64  `gorm:"column:active_lot_version;not null;default:0"`
 	NextQueuePosition int32  `gorm:"column:next_queue_position;type:int;not null;default:1"`
 	UpdatedAtUnixMs   int64  `gorm:"column:updated_at_unix_ms;not null"`
@@ -43,18 +44,15 @@ type AuctionLotModel struct {
 	Status                 int32  `gorm:"column:status;type:int;not null;index:idx_room_status,priority:2;index:idx_status_ends_at,priority:1;index:idx_lot_main_room_status,priority:3"`
 	QueueStatus            int32  `gorm:"column:queue_status;type:int;not null;default:1;index:idx_room_queue,priority:2;index:idx_lot_main_room_queue,priority:3"`
 	QueuePosition          int32  `gorm:"column:queue_position;type:int;not null;default:0;index:idx_room_queue,priority:3;index:idx_lot_main_room_queue,priority:4"`
+	Currency               string `gorm:"column:currency;type:char(3);not null;default:'CNY'"`
 	StartPriceAmount       int64  `gorm:"column:start_price_amount;not null"`
-	StartPriceCurrency     string `gorm:"column:start_price_currency;type:varchar(16);not null"`
 	MinIncrementAmount     int64  `gorm:"column:min_increment_amount;not null"`
-	MinIncrementCurrency   string `gorm:"column:min_increment_currency;type:varchar(16);not null"`
 	CapPriceAmount         *int64 `gorm:"column:cap_price_amount"`
-	CapPriceCurrency       string `gorm:"column:cap_price_currency;type:varchar(16)"`
 	DurationSeconds        int32  `gorm:"column:duration_seconds;type:int;not null"`
 	AntiSnipeWindowSeconds int32  `gorm:"column:anti_snipe_window_seconds;type:int;not null"`
 	AntiSnipeExtendSeconds int32  `gorm:"column:anti_snipe_extend_seconds;type:int;not null"`
 	MaxExtendCount         int32  `gorm:"column:max_extend_count;type:int;not null"`
 	CurrentPriceAmount     int64  `gorm:"column:current_price_amount;not null"`
-	CurrentPriceCurrency   string `gorm:"column:current_price_currency;type:varchar(16);not null"`
 	LeadingUserID          string `gorm:"column:leading_user_id;type:varchar(64);not null;default:''"`
 	LeadingNickname        string `gorm:"column:leading_nickname;type:varchar(128);not null;default:''"`
 	StartedAtUnixMs        int64  `gorm:"column:started_at_unix_ms;not null;default:0"`
@@ -65,8 +63,8 @@ type AuctionLotModel struct {
 	WinnerUserID           string `gorm:"column:winner_user_id;type:varchar(64);not null;default:''"`
 	WinnerNickname         string `gorm:"column:winner_nickname;type:varchar(128);not null;default:''"`
 	FinalPriceAmount       int64  `gorm:"column:final_price_amount;not null;default:0"`
-	FinalPriceCurrency     string `gorm:"column:final_price_currency;type:varchar(16);not null;default:''"`
 	Version                int64  `gorm:"column:version;not null"`
+	ConfigVersion          int64  `gorm:"column:config_version;not null;default:1"`
 	PlaybookStage          int32  `gorm:"column:playbook_stage;type:int;not null"`
 	Payload                string `gorm:"column:payload;type:json;not null"`
 	CreatedAt              time.Time
@@ -74,6 +72,20 @@ type AuctionLotModel struct {
 }
 
 func (AuctionLotModel) TableName() string { return "auction_lots" }
+
+// AuctionLotPresentationModel is an independently versioned live-display
+// aggregate. It must never be used to adjudicate bids or advance lot.version.
+type AuctionLotPresentationModel struct {
+	LotID           string `gorm:"column:lot_id;type:varchar(64);primaryKey"`
+	MainAccountID   string `gorm:"column:main_account_id;type:varchar(64);not null;index:idx_lot_presentation_main"`
+	Version         int64  `gorm:"column:version;not null"`
+	Payload         string `gorm:"column:payload;type:json;not null"`
+	UpdatedAtUnixMs int64  `gorm:"column:updated_at_unix_ms;not null"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+func (AuctionLotPresentationModel) TableName() string { return "auction_lot_presentations" }
 
 type AuctionBidModel struct {
 	ID              string `gorm:"column:id;type:varchar(64);primaryKey"`
@@ -119,33 +131,6 @@ type AuctionLotParticipantModel struct {
 
 func (AuctionLotParticipantModel) TableName() string { return "auction_lot_participants" }
 
-type AuctionRuntimeProjectionOffsetModel struct {
-	LotID                string `gorm:"column:lot_id;type:varchar(64);primaryKey"`
-	RoomID               string `gorm:"column:room_id;type:varchar(64);not null;index:idx_runtime_projection_room"`
-	LastProjectedVersion int64  `gorm:"column:last_projected_version;not null;default:0"`
-	LastStreamID         string `gorm:"column:last_stream_id;type:varchar(64);not null;default:''"`
-	UpdatedAtUnixMs      int64  `gorm:"column:updated_at_unix_ms;not null"`
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-}
-
-func (AuctionRuntimeProjectionOffsetModel) TableName() string {
-	return "auction_runtime_projection_offsets"
-}
-
-type AuctionRuntimeProjectionShardOffsetModel struct {
-	ShardID               int    `gorm:"column:shard_id;primaryKey;autoIncrement:false"`
-	LastStreamID          string `gorm:"column:last_stream_id;type:varchar(64);not null;default:'0-0'"`
-	LastProjectedAtUnixMs int64  `gorm:"column:last_projected_at_unix_ms;not null;default:0"`
-	UpdatedAtUnixMs       int64  `gorm:"column:updated_at_unix_ms;not null"`
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-}
-
-func (AuctionRuntimeProjectionShardOffsetModel) TableName() string {
-	return "auction_runtime_projection_shard_offsets"
-}
-
 type AuctionEventModel struct {
 	ID               string `gorm:"column:id;type:varchar(64);primaryKey"`
 	MainAccountID    string `gorm:"column:main_account_id;type:varchar(64);not null;index:idx_event_main_room_occurred,priority:1"`
@@ -155,9 +140,6 @@ type AuctionEventModel struct {
 	OccurredAtUnixMs int64  `gorm:"column:occurred_at_unix_ms;not null;index:idx_room_occurred,priority:2;index:idx_lot_occurred,priority:2;index:idx_type_occurred,priority:2;index:idx_event_main_room_occurred,priority:3"`
 	Reason           string `gorm:"column:reason;type:varchar(512);not null;default:''"`
 	Payload          string `gorm:"column:payload;type:json;not null"`
-	StreamID         string `gorm:"column:stream_id;type:varchar(64);not null;default:''"`
-	StreamedAtUnixMs int64  `gorm:"column:streamed_at_unix_ms;not null;default:0;index:idx_streamed_at"`
-	LastStreamError  string `gorm:"column:last_stream_error;type:varchar(512);not null;default:''"`
 	CreatedAt        time.Time
 }
 
@@ -193,6 +175,20 @@ type UserOrderModel struct {
 }
 
 func (UserOrderModel) TableName() string { return "user_orders" }
+
+type AuctionOrderEnrichmentModel struct {
+	OrderID         string `gorm:"column:order_id;type:varchar(64);primaryKey"`
+	SourceMessageID string `gorm:"column:source_message_id;type:varchar(128);not null;uniqueIndex:uk_source_message"`
+	PayloadHash     string `gorm:"column:payload_hash;type:char(64);not null"`
+	AddressSnapshot string `gorm:"column:address_snapshot;type:json"`
+	ShopSnapshot    string `gorm:"column:shop_snapshot;type:json"`
+	Status          string `gorm:"column:status;type:varchar(16);not null"`
+	Attempts        int    `gorm:"column:attempts;not null"`
+	LastError       string `gorm:"column:last_error;type:varchar(512);not null"`
+	UpdatedAtUnixMs int64  `gorm:"column:updated_at_ms;not null"`
+}
+
+func (AuctionOrderEnrichmentModel) TableName() string { return "auction_order_enrichments" }
 
 type UserOrderItemModel struct {
 	ID           string `gorm:"column:id;type:varchar(64);primaryKey"`

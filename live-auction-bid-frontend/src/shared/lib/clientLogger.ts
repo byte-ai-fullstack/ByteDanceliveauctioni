@@ -55,11 +55,11 @@ export function clientLog(level: LogLevel, event: string, context?: Record<strin
   console[method](`[LiveAuction] ${event}`, entry);
 }
 
-export function getClientLogs() {
+function getClientLogs() {
   return readLogs();
 }
 
-export function clearClientLogs() {
+function clearClientLogs() {
   writeLogs([]);
 }
 

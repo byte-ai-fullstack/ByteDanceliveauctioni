@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package auction.service.v1;
+
+option go_package = "live-auction-bid/backend/api/auction/service/v1;v1";
+
+import "auction/service/v1/auction.proto";
+
+// PublicRankingItemV1 contains no stable user identifier or raw nickname.
+message PublicRankingItemV1 {
+  int32 rank = 1;
+  string masked_nickname = 2;
+  string masked_avatar_url = 3;
+  int64 amount_fen = 4;
+  int64 bid_at_unix_ms = 5;
+}
+
+// PublicSettlementV1 is a complete terminal snapshot safe for every viewer.
+message PublicSettlementV1 {
+  LotStatus status = 1;
+  int64 final_price_fen = 2;
+  string masked_winner_nickname = 3;
+  int64 settled_at_unix_ms = 4;
+  string cancel_reason = 5;
+}
+
+// RoomSnapshotPublicV1 is an immutable, fully redacted room state.
+message RoomSnapshotPublicV1 {
+  string room_id = 1;
+  string lot_id = 2;
+  int64 lot_version = 3;
+  LotStatus status = 4;
+  int64 current_price_fen = 5;
+  int64 ends_at_unix_ms = 6;
+  int64 bid_count = 7;
+  repeated PublicRankingItemV1 top_ranking = 8;
+  optional PublicSettlementV1 settlement = 9;
+}
+
+// PersonalDeltaV1 overlays one user's private state on the same public version.
+message PersonalDeltaV1 {
+  string user_id = 1;
+  string lot_id = 2;
+  int64 lot_version = 3;
+  optional int32 your_rank = 4;
+  optional int64 your_amount_fen = 5;
+  bool you_are_leading = 6;
+  optional string your_order_id = 7;
+  OrderVisibility order_visibility = 8;
+  bool tombstone = 9;
+}
+
+// RoomHeartbeatV1 lets clients detect missed snapshots without durable fanout.
+message RoomHeartbeatV1 {
+  string lot_id = 1;
+  int64 authoritative_lot_version = 2;
+  LotStatus status = 3;
+  int64 server_time_unix_ms = 4;
+}
+
+// AdminRankingItemV1 is visible only to an authorized merchant account.
+message AdminRankingItemV1 {
+  int32 rank = 1;
+  string user_id = 2;
+  string nickname = 3;
+  string avatar_url = 4;
+  int64 amount_fen = 5;
+  int64 bid_at_unix_ms = 6;
+}
+
+// RoomSnapshotAdminV1 contains the authorized operator view of a room version.
+message RoomSnapshotAdminV1 {
+  string main_account_id = 1;
+  string room_id = 2;
+  string lot_id = 3;
+  int64 lot_version = 4;
+  LotStatus status = 5;
+  int64 current_price_fen = 6;
+  int64 ends_at_unix_ms = 7;
+  repeated AdminRankingItemV1 top_ranking = 8;
+}
+
+// ReconnectControlV1 requests a jittered reconnect and authoritative snapshot.
+message ReconnectControlV1 {
+  int64 retry_after_ms = 1;
+  string reason = 2;
+}
+
+// RealtimeEnvelopeV1 is the only target WebSocket wire envelope.
+message RealtimeEnvelopeV1 {
+  string message_id = 1;
+  uint32 schema_version = 2;
+  int64 occurred_at_unix_ms = 3;
+  oneof payload {
+    RoomSnapshotPublicV1 public_snapshot = 4;
+    PersonalDeltaV1 personal_delta = 5;
+    RoomHeartbeatV1 heartbeat = 6;
+    RoomSnapshotAdminV1 admin_snapshot = 7;
+    ReconnectControlV1 reconnect = 8;
+  }
+}

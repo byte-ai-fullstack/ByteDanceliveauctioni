@@ -1,0 +1,26 @@
+{
+  "description": "表现锁 ① 样式字节锁。改动必须单独提 PR 并说明视觉影响。见 docs/REFACTORING_PLAN.md §0.2。",
+  "totalBytes": 809319,
+  "stylesheets": [
+    {
+      "path": "src/app/studio-tokens.css",
+      "bytes": 318948,
+      "sha256": "f08078ed3c3e2794b9fd683be16f224e96d5ef074bf984b1baeda3dea05c124f"
+    },
+    {
+      "path": "src/app/styles.css",
+      "bytes": 384742,
+      "sha256": "be95744664e23f014f5f928b14c82c02bd72b1d52eab78303fbf3409479a523b"
+    },
+    {
+      "path": "src/features/auction-manage/admin-dashboard.css",
+      "bytes": 32121,
+      "sha256": "554745e9e35f4804dd3f070944591fb3ae9c499b38e44465827841c9f46f5127"
+    },
+    {
+      "path": "src/pages/host-console/styles/console-round06.css",
+      "bytes": 73508,
+      "sha256": "87994c8d982bd82699f799d561428d06d9781a23fd94ef67733377d59e213e2c"
+    }
+  ]
+}

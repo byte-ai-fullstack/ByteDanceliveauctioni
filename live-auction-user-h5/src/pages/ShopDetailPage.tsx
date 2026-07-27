@@ -204,6 +204,7 @@ export function ShopDetailPage() {
           description="订单、地址和支付状态会按当前买家账号隔离。"
           actionLabel="继续购买"
           onAuthenticated={() => setAuthOpen(false)}
+          onClose={() => setAuthOpen(false)}
         />
       ) : null}
     </main>

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	mathrand "math/rand"
@@ -9,11 +10,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "live-auction-bid/backend/api/auction/service/v1"
 	"live-auction-bid/backend/app/auction/service/internal/aiassistant"
 	"live-auction-bid/backend/app/auction/service/internal/biz/auction"
+	"live-auction-bid/backend/app/auction/service/internal/observability"
 	"live-auction-bid/backend/app/auction/service/internal/searchindex"
 )
 
@@ -37,13 +40,31 @@ func (s *AuctionService) SetAIAssistant(assistant *aiassistant.Assistant) *Aucti
 	return s
 }
 
-func (s *AuctionService) SetBuyerSearch(index *searchindex.PGVectorIndex, embedder *searchindex.EmbeddingClient) *AuctionService {
+func (s *AuctionService) SetBuyerSearch(keywords buyerKeywordSearch, vectors buyerVectorSearch, embedder buyerEmbeddingClient) *AuctionService {
 	if s == nil {
 		return nil
 	}
-	s.buyerSearch = index
+	s.buyerKeywords = keywords
+	s.buyerVectors = vectors
 	s.buyerEmbedder = embedder
 	return s
+}
+
+func (s *AuctionService) SetBuyerSearchTimeout(timeout time.Duration) *AuctionService {
+	if s == nil {
+		return nil
+	}
+	if timeout > 0 {
+		s.buyerSearchTimeout = timeout
+	}
+	return s
+}
+
+func (s *AuctionService) searchTimeout() time.Duration {
+	if s != nil && s.buyerSearchTimeout > 0 {
+		return s.buyerSearchTimeout
+	}
+	return 5 * time.Second
 }
 
 func (s *AuctionService) ConsultBuyer(ctx context.Context, req *v1.BuyerConsultRequest) (*v1.BuyerConsultReply, error) {
@@ -87,9 +108,83 @@ func (s *AuctionService) aiAssistant() *aiassistant.Assistant {
 }
 
 func (s *AuctionService) buyerCandidates(ctx context.Context, req aiassistant.BuyerConsultRequest, intent buyerQueryIntent) []aiassistant.LotCandidate {
-	vector := s.vectorBuyerCandidates(ctx, req, intent)
-	keyword := s.keywordBuyerCandidates(ctx, req, intent)
-	return mergeBuyerCandidates(vector, keyword, 8)
+	if s == nil || s.auction == nil {
+		return nil
+	}
+	keywordConfigured := s.buyerKeywords != nil
+	vectorConfigured := s.buyerVectors != nil && s.buyerEmbedder != nil && s.buyerEmbedder.Configured() && strings.TrimSpace(req.Query) != ""
+	if !keywordConfigured && !vectorConfigured {
+		observability.RecordSearchFallback("mysql_only")
+		return s.keywordBuyerCandidates(ctx, req, intent)
+	}
+
+	var keywordDocuments, vectorDocuments []searchindex.LotDocument
+	var keywordErr, vectorErr error
+	var wait sync.WaitGroup
+	if keywordConfigured {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			started := time.Now()
+			searchCtx, cancel := context.WithTimeout(ctx, s.searchTimeout())
+			defer cancel()
+			keywordDocuments, keywordErr = s.buyerKeywords.SearchKeywords(searchCtx, searchindex.KeywordSearchQuery{
+				Query: strings.TrimSpace(req.Query), RoomID: strings.TrimSpace(req.RoomID), LotID: strings.TrimSpace(req.LotID),
+				Statuses: buyerSearchStatuses(intent), Limit: 20,
+			})
+			observability.RecordSearchRetrieval("elasticsearch", searchResultLabel(keywordErr), time.Since(started))
+		}()
+	}
+	if vectorConfigured {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			started := time.Now()
+			searchCtx, cancel := context.WithTimeout(ctx, s.searchTimeout())
+			defer cancel()
+			embeddings, err := s.buyerEmbedder.Embed(searchCtx, []string{strings.TrimSpace(req.Query)})
+			if err != nil {
+				vectorErr = err
+			} else if len(embeddings) == 0 {
+				vectorErr = errors.New("embedding provider returned no query vector")
+			} else {
+				vectorDocuments, vectorErr = s.buyerVectors.Search(searchCtx, searchindex.SearchQuery{
+					Vector: embeddings[0], RoomID: strings.TrimSpace(req.RoomID), LotID: strings.TrimSpace(req.LotID), Limit: 20,
+				})
+			}
+			observability.RecordSearchRetrieval("pgvector", searchResultLabel(vectorErr), time.Since(started))
+		}()
+	}
+	wait.Wait()
+	if keywordErr != nil {
+		slog.Warn("buyer Elasticsearch retrieval failed", "error", keywordErr)
+	}
+	if vectorErr != nil {
+		slog.Warn("buyer pgvector retrieval failed", "error", vectorErr)
+	}
+	if len(keywordDocuments) == 0 && len(vectorDocuments) == 0 {
+		observability.RecordSearchFallback("mysql_after_empty_or_error")
+		return s.keywordBuyerCandidates(ctx, req, intent)
+	}
+	ranked := reciprocalRankFusion([][]searchindex.LotDocument{keywordDocuments, vectorDocuments}, 60, 40)
+	candidates, err := s.hydrateBuyerCandidates(ctx, ranked, req, intent, 8)
+	if err != nil {
+		slog.Warn("buyer search authoritative hydration failed", "error", err)
+		observability.RecordSearchFallback("mysql_after_hydration_error")
+		return s.keywordBuyerCandidates(ctx, req, intent)
+	}
+	if len(candidates) == 0 {
+		observability.RecordSearchFallback("mysql_after_hydration_empty")
+		return s.keywordBuyerCandidates(ctx, req, intent)
+	}
+	mode := "hybrid"
+	if len(keywordDocuments) == 0 {
+		mode = "vector_only"
+	} else if len(vectorDocuments) == 0 {
+		mode = "keyword_only"
+	}
+	observability.RecordSearchFusion(mode, len(ranked), len(candidates))
+	return candidates
 }
 
 func (s *AuctionService) buyerSuggestionCandidates(ctx context.Context, limit int) []aiassistant.LotCandidate {
@@ -102,30 +197,41 @@ func (s *AuctionService) buyerSuggestionCandidates(ctx context.Context, limit in
 }
 
 func (s *AuctionService) randomVectorBuyerCandidates(ctx context.Context, limit int) []aiassistant.LotCandidate {
-	if s == nil || s.buyerSearch == nil {
+	if s == nil || s.buyerVectors == nil {
 		return nil
 	}
-	docs, err := s.buyerSearch.RandomPublicDocuments(ctx, limit*2)
+	docs, err := s.buyerVectors.RandomPublicDocuments(ctx, limit*2)
 	if err != nil {
 		slog.Warn("buyer suggestion vector pool failed", "error", err)
 		return nil
 	}
-	roomNames := s.publicVisibleRoomNames(ctx)
+	lotIDs := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		if strings.TrimSpace(doc.LotID) != "" {
+			lotIDs = append(lotIDs, doc.LotID)
+		}
+	}
+	lotsByID, roomNames, err := s.loadAuthoritativeLots(ctx, lotIDs)
+	if err != nil {
+		slog.Warn("buyer suggestion authoritative hydration failed", "error", err)
+		return nil
+	}
 	out := make([]aiassistant.LotCandidate, 0, len(docs))
 	seen := map[string]bool{}
 	for _, doc := range docs {
 		if doc.LotID == "" || seen[doc.LotID] {
 			continue
 		}
-		if _, ok := roomNames[doc.RoomID]; !ok {
+		lot := lotsByID[doc.LotID]
+		if lot == nil || !auction.IsPublicVisibleLotStatus(lot.GetStatus()) {
 			continue
 		}
-		lot, err := s.auction.GetLot(ctx, doc.LotID)
-		if err != nil || lot == nil || !auction.IsPublicVisibleLotStatus(lot.GetStatus()) {
+		roomName, ok := roomNames[lot.GetRoomId()]
+		if !ok {
 			continue
 		}
 		seen[doc.LotID] = true
-		_, reason := scoreLot(buyerQueryIntent{}, lot, roomNames[doc.RoomID])
+		_, reason := scoreLot(buyerQueryIntent{}, lot, roomName)
 		out = append(out, aiassistant.LotCandidate{
 			Type:         "lot",
 			Title:        lot.GetTitle(),
@@ -248,121 +354,43 @@ func (s *AuctionService) keywordBuyerCandidates(ctx context.Context, req aiassis
 	return candidates
 }
 
-func (s *AuctionService) vectorBuyerCandidates(ctx context.Context, req aiassistant.BuyerConsultRequest, intent buyerQueryIntent) []aiassistant.LotCandidate {
-	if s == nil || s.buyerSearch == nil || s.buyerEmbedder == nil || !s.buyerEmbedder.Configured() {
-		return nil
-	}
-	query := strings.TrimSpace(req.Query)
-	if query == "" {
-		return nil
-	}
-	embeddings, err := s.buyerEmbedder.Embed(ctx, []string{query})
-	if err != nil || len(embeddings) == 0 {
-		if err != nil {
-			slog.Warn("buyer vector search embedding failed", "error", err)
-		}
-		return nil
-	}
-	docs, err := s.buyerSearch.Search(ctx, searchindex.SearchQuery{
-		Vector: embeddings[0],
-		RoomID: strings.TrimSpace(req.RoomID),
-		LotID:  strings.TrimSpace(req.LotID),
-		Limit:  20,
-	})
-	if err != nil {
-		slog.Warn("buyer vector search failed", "error", err)
-		return nil
-	}
-	roomNames := s.publicVisibleRoomNames(ctx)
-	out := make([]aiassistant.LotCandidate, 0, len(docs))
-	seen := map[string]bool{}
-	for rank, doc := range docs {
-		if doc.LotID == "" || seen[doc.LotID] {
-			continue
-		}
-		if req.RoomID != "" && doc.RoomID != req.RoomID {
-			continue
-		}
-		if req.LotID != "" && doc.LotID != req.LotID {
-			continue
-		}
-		if _, ok := roomNames[doc.RoomID]; !ok {
-			continue
-		}
-		lot, err := s.auction.GetLot(ctx, doc.LotID)
-		if err != nil || lot == nil || !auction.IsPublicVisibleLotStatus(lot.GetStatus()) {
-			continue
-		}
-		if !buyerStatusMatchesIntent(lot.GetStatus(), intent.StatusIntent) {
-			continue
-		}
-		if intent.RoomName != "" && !strings.Contains(strings.ToLower(roomNames[doc.RoomID]), strings.ToLower(intent.RoomName)) {
-			continue
-		}
-		seen[doc.LotID] = true
-		matchScore, reason := scoreLot(intent, lot, roomNames[doc.RoomID])
-		score := 80 - rank + matchScore
-		if price := currentSearchPrice(lot); intent.Budget > 0 && price > 0 && price <= intent.Budget {
-			score += 4
-		}
-		if reason == "" {
-			reason = "语义匹配你的描述"
-		}
-		out = append(out, aiassistant.LotCandidate{
-			Type:         "lot",
-			Title:        lot.GetTitle(),
-			RoomID:       lot.GetRoomId(),
-			LotID:        lot.GetId(),
-			Status:       lot.GetStatus().String(),
-			CurrentPrice: searchPriceMoney(lot),
-			Href:         "/m/room/" + lot.GetRoomId(),
-			Reason:       reason,
-			ImageURL:     lot.GetImageUrl(),
-			Score:        score,
-		})
-	}
-	return out
+type fusedLotRank struct {
+	LotID   string
+	Score   float64
+	Sources int
 }
 
-func (s *AuctionService) publicVisibleRoomNames(ctx context.Context) map[string]string {
-	rooms, err := s.auction.ListRooms(ctx, auction.RoomQuery{PublicOnly: true, PublicVisibleOnly: true})
-	if err != nil {
-		return map[string]string{}
+func reciprocalRankFusion(rankings [][]searchindex.LotDocument, rankConstant, limit int) []fusedLotRank {
+	if rankConstant <= 0 {
+		rankConstant = 60
 	}
-	out := make(map[string]string, len(rooms))
-	for _, room := range rooms {
-		out[room.ID] = room.Name
-	}
-	return out
-}
-
-func mergeBuyerCandidates(primary, secondary []aiassistant.LotCandidate, limit int) []aiassistant.LotCandidate {
 	if limit <= 0 {
-		limit = 8
+		limit = 40
 	}
-	byLotID := make(map[string]int)
-	out := make([]aiassistant.LotCandidate, 0, len(primary)+len(secondary))
-	add := func(candidate aiassistant.LotCandidate) {
-		if strings.TrimSpace(candidate.LotID) == "" {
-			return
-		}
-		if pos, ok := byLotID[candidate.LotID]; ok {
-			if candidate.Score > out[pos].Score {
-				out[pos].Score = candidate.Score
+	byLotID := make(map[string]*fusedLotRank)
+	for _, ranking := range rankings {
+		seen := make(map[string]struct{}, len(ranking))
+		for rank, document := range ranking {
+			lotID := strings.TrimSpace(document.LotID)
+			if lotID == "" {
+				continue
 			}
-			if out[pos].Reason == "" {
-				out[pos].Reason = candidate.Reason
+			if _, duplicate := seen[lotID]; duplicate {
+				continue
 			}
-			return
+			seen[lotID] = struct{}{}
+			entry := byLotID[lotID]
+			if entry == nil {
+				entry = &fusedLotRank{LotID: lotID}
+				byLotID[lotID] = entry
+			}
+			entry.Score += 1 / float64(rankConstant+rank+1)
+			entry.Sources++
 		}
-		byLotID[candidate.LotID] = len(out)
-		out = append(out, candidate)
 	}
-	for _, candidate := range primary {
-		add(candidate)
-	}
-	for _, candidate := range secondary {
-		add(candidate)
+	out := make([]fusedLotRank, 0, len(byLotID))
+	for _, entry := range byLotID {
+		out = append(out, *entry)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -374,6 +402,113 @@ func mergeBuyerCandidates(primary, secondary []aiassistant.LotCandidate, limit i
 		return out[:limit]
 	}
 	return out
+}
+
+func (s *AuctionService) hydrateBuyerCandidates(
+	ctx context.Context,
+	ranked []fusedLotRank,
+	req aiassistant.BuyerConsultRequest,
+	intent buyerQueryIntent,
+	limit int,
+) ([]aiassistant.LotCandidate, error) {
+	lotIDs := make([]string, 0, len(ranked))
+	for _, candidate := range ranked {
+		lotIDs = append(lotIDs, candidate.LotID)
+	}
+	lotsByID, roomNames, err := s.loadAuthoritativeLots(ctx, lotIDs)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+	out := make([]aiassistant.LotCandidate, 0, limit)
+	for _, rank := range ranked {
+		lot := lotsByID[rank.LotID]
+		if lot == nil || !auction.IsPublicVisibleLotStatus(lot.GetStatus()) {
+			continue
+		}
+		roomName, publicRoom := roomNames[lot.GetRoomId()]
+		if !publicRoom || (req.RoomID != "" && lot.GetRoomId() != req.RoomID) || (req.LotID != "" && lot.GetId() != req.LotID) ||
+			!buyerStatusMatchesIntent(lot.GetStatus(), intent.StatusIntent) {
+			continue
+		}
+		if intent.RoomName != "" && !strings.Contains(strings.ToLower(roomName), strings.ToLower(intent.RoomName)) {
+			continue
+		}
+		matchScore, reason := scoreLot(intent, lot, roomName)
+		if rank.Sources == 1 && reason == "公开可见 · 可进直播间查看" {
+			reason = "检索匹配你的描述 · " + reason
+		}
+		out = append(out, aiassistant.LotCandidate{
+			Type: "lot", Title: lot.GetTitle(), RoomID: lot.GetRoomId(), LotID: lot.GetId(), Status: lot.GetStatus().String(),
+			CurrentPrice: searchPriceMoney(lot), Href: "/m/room/" + lot.GetRoomId(), Reason: reason,
+			ImageURL: lot.GetImageUrl(), Score: int(math.Round(rank.Score*1_000_000)) + matchScore,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		return out[i].LotID < out[j].LotID
+	})
+	if len(out) > limit {
+		return out[:limit], nil
+	}
+	return out, nil
+}
+
+func (s *AuctionService) loadAuthoritativeLots(ctx context.Context, lotIDs []string) (map[string]*v1.Lot, map[string]string, error) {
+	lots, err := s.auction.FindLotsByIDs(ctx, lotIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	roomNames, err := s.loadPublicVisibleRoomNames(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	byID := make(map[string]*v1.Lot, len(lots))
+	for _, lot := range lots {
+		if lot == nil || strings.TrimSpace(lot.GetId()) == "" {
+			continue
+		}
+		byID[lot.GetId()] = lot
+	}
+	return byID, roomNames, nil
+}
+
+func buyerSearchStatuses(intent buyerQueryIntent) []string {
+	statuses := buyerCandidateStatuses(intent)
+	out := make([]string, 0, len(statuses))
+	seen := make(map[string]struct{}, len(statuses))
+	for _, status := range statuses {
+		value := status.String()
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func searchResultLabel(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
+}
+
+func (s *AuctionService) loadPublicVisibleRoomNames(ctx context.Context) (map[string]string, error) {
+	rooms, err := s.auction.ListRooms(ctx, auction.RoomQuery{PublicOnly: true, PublicVisibleOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rooms))
+	for _, room := range rooms {
+		out[room.ID] = room.Name
+	}
+	return out, nil
 }
 
 func mergeRandomBuyerCandidates(primary, secondary []aiassistant.LotCandidate, limit int) []aiassistant.LotCandidate {

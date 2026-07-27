@@ -223,10 +223,10 @@ export function useLiveRoomController(roomId: string) {
       if (!options.silent) pushNotice(e instanceof Error ? e.message : '成交结果同步失败');
       return null;
     }
-  }, [closeTransientPanelsForResult, pushNotice, refreshLotResult, refreshOrders, resultLot?.id]);
+  }, [closeTransientPanelsForResult, pushNotice, refreshLotResult, refreshOrders, resultLot]);
 
   const recoverRealtimeState = useCallback(async () => {
-    await reload().catch(() => undefined);
+    const snapshot = await reload().catch(() => undefined);
     await refreshRoomLots().catch(() => undefined);
     const lotId = resultLot?.id || currentLot?.id || '';
     if (lotId) {
@@ -238,6 +238,7 @@ export function useLiveRoomController(roomId: string) {
     } else {
       await refreshOrders(DEFAULT_ACTIVITY_QUERY).catch(() => undefined);
     }
+    return snapshot;
   }, [currentLot?.id, refreshOrders, refreshRoomLots, reload, resultLot, syncPrivateResult]);
 
   const handleSocketEvent = useCallback((event: AuctionSocketEvent) => {
@@ -269,7 +270,7 @@ export function useLiveRoomController(roomId: string) {
     }
   }, [applyEvent, currentLot, meId, pushNotice, refreshRoomLots, resultLot?.id, room.currentLot?.leadingUserId, roomId, syncPrivateResult]);
 
-  const wsState = useAuctionSocket(roomId, handleSocketEvent, recoverRealtimeState);
+  const wsState = useAuctionSocket(roomId, handleSocketEvent, recoverRealtimeState, meId);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -295,10 +296,7 @@ export function useLiveRoomController(roomId: string) {
 
     return () => window.clearTimeout(timer);
   }, [
-    currentLot?.endsAtUnixMs,
-    currentLot?.id,
-    currentLot?.status,
-    currentLot?.version,
+    currentLot,
     recoverRealtimeState,
     room.serverTimeReceivedAtUnixMs,
     room.serverTimeUnixMs,
@@ -432,6 +430,8 @@ export function useLiveRoomController(roomId: string) {
       }
     } catch (e) {
       if (e instanceof AppApiError && e.code === RESULT_CODE.DEPOSIT_REQUIRED) {
+        setAuctionPanelOpen(false);
+        setAuthPanelForcedOpen(false);
         setDepositPrompt({ lot: currentLot, bidAmount: amount, userId: session.user.id });
         setBidError('');
         pushNotice('出价前需先支付保证金');
@@ -504,7 +504,7 @@ export function useLiveRoomController(roomId: string) {
     setResultLot(null);
     setResultOrder(null);
     setPayOrder(null);
-  }, [resultLot?.id]);
+  }, [resultLot]);
 
   const nextLot = useCallback(() => {
     if (resultLot?.id) dismissedResultLotIdsRef.current.add(resultLot.id);
@@ -512,7 +512,7 @@ export function useLiveRoomController(roomId: string) {
     setResultOrder(null);
     void reload().catch(() => undefined);
     void refreshRoomLots().catch(() => undefined);
-  }, [refreshRoomLots, reload, resultLot?.id]);
+  }, [refreshRoomLots, reload, resultLot]);
 
   return {
     roomId,

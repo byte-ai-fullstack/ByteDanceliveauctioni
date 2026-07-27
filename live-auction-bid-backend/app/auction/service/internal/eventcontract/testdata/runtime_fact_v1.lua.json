@@ -1,0 +1,38 @@
+{
+  "event_id": "018f22f2-c640-7f5a-8c8a-9af2b3459e71",
+  "trace_id": "trace-1",
+  "lot_id": "lot-1",
+  "room_id": "room-1",
+  "prev_lot_version": 6,
+  "lot_version": 7,
+  "occurred_at_unix_ms": 1700000000000,
+  "config_version": 3,
+  "command": 2,
+  "state_after": {
+    "lot_id": "lot-1",
+    "room_id": "room-1",
+    "status": 2,
+    "currency": "CNY",
+    "start_price_fen": 10000,
+    "min_increment_fen": 100,
+    "current_price_fen": 12000,
+    "leading_user_id": "user-1",
+    "leading_nickname": "User 1",
+    "started_at_unix_ms": 1699999940000,
+    "ends_at_unix_ms": 1700000060000,
+    "bid_count": 4,
+    "participant_count": 3,
+    "duration_ms": 60000,
+    "anti_snipe_window_ms": 10000,
+    "anti_snipe_extend_ms": 30000
+  },
+  "accepted_bid": {
+    "bid_id": "bid-1",
+    "user_id": "user-1",
+    "nickname": "User 1",
+    "amount_fen": 12000,
+    "accepted_at_unix_ms": 1700000000000
+  },
+  "idempotency_key": "idem-1",
+  "schema_version": 1
+}

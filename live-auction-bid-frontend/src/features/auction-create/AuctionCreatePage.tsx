@@ -1,110 +1,13 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
+import { useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
 import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, ChevronLeft, ChevronRight, ImagePlus, Trash2, UploadCloud } from 'lucide-react';
+import { AppLink } from '../../shared/router/AppLink';
+import { useAppNavigate } from '../../shared/router/historyStore';
 import { createDraftLot, deleteUploadedImage, patchDraftLot, queueLot, uploadImage } from '../auction/api/auctionApi';
-import type { CreateLotRequest, Money, TrustCardType, UploadedAsset } from '../../shared/api/types';
 import { resultMessage } from '../../shared/api/result';
 import { formatMoneyText } from '../../shared/lib/format';
-import { StudioButton, StudioCard, StudioField, StudioPageHeader, StudioToastViewport, useStudioToast } from '../../pages/host-console/components/studio-ui';
-
-type UploadedImage = {
-  assetId?: string;
-  imageUrl: string;
-  fileName?: string;
-  sizeBytes?: number | string;
-};
-
-type TrustCardKey = 'certificate' | 'flaw' | 'detail' | 'service';
-
-type TrustCardDraft = {
-  content: string;
-  imageUrl: string;
-  assetId?: string;
-};
-
-type FormState = {
-  title: string;
-  description: string;
-  imageUrl: string;
-  mainImageAssetId?: string;
-  gallery: UploadedImage[];
-  categoryMode: 'preset' | 'custom';
-  category: string;
-  tags: string;
-  estimatePrice: number | '';
-  stock: number;
-  afterSaleNotes: string;
-  startPrice: number;
-  minIncrement: number;
-  capPrice: number | '';
-  depositAmount: number;
-  durationSeconds: number;
-  antiSnipeWindowSeconds: number;
-  antiSnipeExtendSeconds: number;
-  maxExtendCount: number;
-  trustCards: Record<TrustCardKey, TrustCardDraft>;
-};
-
-type StepKey = 'product' | 'rules' | 'briefing' | 'review';
-
-type FormIssue = { level: 'error' | 'warning' | 'success'; step: StepKey; text: string };
-
-const STEP_DEFS: Array<{ key: StepKey; label: string; hint: string }> = [
-  { key: 'product', label: '拍品资料', hint: '图片 / 基础信息' },
-  { key: 'rules', label: '竞拍规则', hint: '价格 / 延时机制' },
-  { key: 'briefing', label: '主播讲解', hint: '证书 / 瑕疵 / 售后' },
-  { key: 'review', label: '确认发布', hint: '检查后入队' },
-];
-
-const TRUST_CARD_DEFS: Array<{ key: TrustCardKey; type: TrustCardType; title: string; label: string; placeholder: string }> = [
-  { key: 'certificate', type: 'TRUST_CARD_TYPE_CERTIFICATE', title: '证书卡', label: '证书信息', placeholder: '证书编号、鉴定机构、材质证明等' },
-  { key: 'flaw', type: 'TRUST_CARD_TYPE_FLAW', title: '瑕疵说明卡', label: '瑕疵说明', placeholder: '如实记录磨损、划痕、缺件或使用痕迹' },
-  { key: 'detail', type: 'TRUST_CARD_TYPE_DETAIL', title: '细节展示卡', label: '细节说明', placeholder: '工艺、材质、尺寸、佩戴/使用细节' },
-  { key: 'service', type: 'TRUST_CARD_TYPE_SERVICE', title: '售后说明卡', label: '售后说明', placeholder: '退换、支付、发货、客服承诺等' },
-];
-
-const CUSTOM_CATEGORY_VALUE = '__custom__';
-
-const CATEGORY_OPTIONS = [
-  '翡翠玉石',
-  '珠宝彩宝',
-  '黄金贵金属',
-  '腕表配饰',
-  '文玩收藏',
-  '字画艺术',
-  '陶瓷紫砂',
-  '潮玩手办',
-  '奢侈品',
-  '酒水茶叶',
-  '数码家电',
-  '服饰箱包',
-];
-
-const initialForm: FormState = {
-  title: '',
-  description: '',
-  imageUrl: '',
-  gallery: [],
-  categoryMode: 'preset',
-  category: '',
-  tags: '',
-  estimatePrice: '',
-  stock: 1,
-  afterSaleNotes: '',
-  startPrice: 0,
-  minIncrement: 50,
-  capPrice: '',
-  depositAmount: 0,
-  durationSeconds: 300,
-  antiSnipeWindowSeconds: 10,
-  antiSnipeExtendSeconds: 15,
-  maxExtendCount: 5,
-  trustCards: {
-    certificate: { content: '', imageUrl: '' },
-    flaw: { content: '', imageUrl: '' },
-    detail: { content: '', imageUrl: '' },
-    service: { content: '', imageUrl: '' },
-  },
-};
+import { StudioButton, StudioCard, StudioField, StudioPageHeader, StudioToastViewport } from '../../pages/host-console/components/studio-ui';
+import { useStudioToast } from '../../pages/host-console/components/studio-toast';
+import { auctionMoney, buildTrustCards, CATEGORY_OPTIONS, CUSTOM_CATEGORY_VALUE, imageFromAsset, initialForm, isBlockingIssue, issueText, parseTags, shortURL, STEP_DEFS, stepIndex, toRequest, TRUST_CARD_DEFS, validate, type FormState, type StepKey, type TrustCardDraft, type TrustCardKey } from './model/auctionCreateForm';
 
 type AuctionCreatePageProps = {
   roomId: string;
@@ -112,6 +15,7 @@ type AuctionCreatePageProps = {
 };
 
 export function AuctionCreatePage({ roomId, roomName = roomId }: AuctionCreatePageProps) {
+  const navigate = useAppNavigate();
   const [form, setForm] = useState<FormState>(initialForm);
   const [activeStep, setActiveStep] = useState<StepKey>('product');
   const [previewImageIndex, setPreviewImageIndex] = useState(0);
@@ -130,7 +34,8 @@ export function AuctionCreatePage({ roomId, roomName = roomId }: AuctionCreatePa
     ...(form.imageUrl ? [{ imageUrl: form.imageUrl, label: '主图' }] : []),
     ...form.gallery.map((image, index) => ({ imageUrl: image.imageUrl, label: `轮播 ${index + 1}` })),
   ], [form.gallery, form.imageUrl]);
-  const previewImage = previewImages[previewImageIndex] || previewImages[0];
+  const resolvedPreviewImageIndex = Math.min(previewImageIndex, Math.max(previewImages.length - 1, 0));
+  const previewImage = previewImages[resolvedPreviewImageIndex] || previewImages[0];
   const activeStepIndex = STEP_DEFS.findIndex((step) => step.key === activeStep);
   const currentStepBlocking = activeStep === 'review' ? blockingIssues : blockingIssues.filter((issue) => issue.step === activeStep);
   const currentStepHasError = currentStepBlocking.length > 0;
@@ -159,10 +64,6 @@ export function AuctionCreatePage({ roomId, roomName = roomId }: AuctionCreatePa
     const previousStep = STEP_DEFS[activeStepIndex - 1];
     if (previousStep) setActiveStep(previousStep.key);
   };
-
-  useEffect(() => {
-    setPreviewImageIndex((index) => Math.min(index, Math.max(previewImages.length - 1, 0)));
-  }, [previewImages.length]);
 
   const update = (patch: Partial<FormState>) => setForm((current) => ({ ...current, ...patch }));
   const updateCategory = (value: string) => {
@@ -260,7 +161,7 @@ export function AuctionCreatePage({ roomId, roomName = roomId }: AuctionCreatePa
       const saved = await patchDraftLot(draft.id, toRequest(form, roomId));
       const queued = await queueLot(saved.id);
       showToast({ tone: 'success', title: '拍品已加入本场队列', description: `${queued.lot.title} · #${queued.queuePosition || queued.lot.queuePosition || '-'}` });
-      window.setTimeout(() => { location.href = '/admin/auctions?queued=1'; }, 350);
+      window.setTimeout(() => { void navigate('/admin/auctions?queued=1'); }, 350);
     } catch (e) {
       const message = resultMessage(e);
       setError(message);
@@ -272,7 +173,7 @@ export function AuctionCreatePage({ roomId, roomName = roomId }: AuctionCreatePa
   return <section className="auctionCreatePage">
     <StudioToastViewport toasts={toasts} className="auctionCreateToastViewport" />
     <StudioCard padding="lg" className="auctionCreateTitleBar auctionCreateHeader">
-      <StudioPageHeader eyebrow="Create lot" title="添加拍品" actions={<a className="studioButton studioButton-secondary studioButton-md" href="/admin/auctions">返回队列</a>} />
+      <StudioPageHeader eyebrow="Create lot" title="添加拍品" actions={<AppLink className="studioButton studioButton-secondary studioButton-md" to="/admin/auctions">返回队列</AppLink>} />
     </StudioCard>
     {error ? <div className="auctionMgmtNotice danger"><AlertTriangle size={16} />{error}</div> : null}
     <nav className="publishStepper auctionCreateStepper" aria-label="添加拍品步骤">
@@ -399,11 +300,11 @@ export function AuctionCreatePage({ roomId, roomName = roomId }: AuctionCreatePa
               <div className="phoneImage">
                 {previewImage ? <img src={previewImage.imageUrl} alt={`${previewImage.label}预览`} /> : <ImagePlus size={28} />}
                 {previewImages.length > 1 ? <>
-                  <button className="phoneImageNav prev" type="button" aria-label="上一张预览图" onClick={() => setPreviewImageIndex((index) => (index + previewImages.length - 1) % previewImages.length)}><ChevronLeft size={15} /></button>
-                  <button className="phoneImageNav next" type="button" aria-label="下一张预览图" onClick={() => setPreviewImageIndex((index) => (index + 1) % previewImages.length)}><ChevronRight size={15} /></button>
+                  <button className="phoneImageNav prev" type="button" aria-label="上一张预览图" onClick={() => setPreviewImageIndex((resolvedPreviewImageIndex + previewImages.length - 1) % previewImages.length)}><ChevronLeft size={15} /></button>
+                  <button className="phoneImageNav next" type="button" aria-label="下一张预览图" onClick={() => setPreviewImageIndex((resolvedPreviewImageIndex + 1) % previewImages.length)}><ChevronRight size={15} /></button>
                 </> : null}
               </div>
-              {previewImages.length > 1 ? <div className="phoneCarouselStrip">{previewImages.map((image, index) => <button key={`${image.imageUrl}-${index}`} type="button" className={index === previewImageIndex ? 'active' : ''} onClick={() => setPreviewImageIndex(index)}><img src={image.imageUrl} alt={image.label} /><span>{index + 1}</span></button>)}</div> : null}
+              {previewImages.length > 1 ? <div className="phoneCarouselStrip">{previewImages.map((image, index) => <button key={`${image.imageUrl}-${index}`} type="button" className={index === resolvedPreviewImageIndex ? 'active' : ''} onClick={() => setPreviewImageIndex(index)}><img src={image.imageUrl} alt={image.label} /><span>{index + 1}</span></button>)}</div> : null}
               <div className="phoneLotInfo">
                 <h4>{form.title || '拍品名称待填写'}</h4>
               </div>
@@ -427,117 +328,4 @@ export function AuctionCreatePage({ roomId, roomName = roomId }: AuctionCreatePa
 
 function AuctionField({ label, help, error, children, className = '' }: { label: string; help?: string; error?: string; children: ReactNode; className?: string }) {
   return <div className={`auctionField ${className}`.trim()}><span>{label}</span>{children}{help ? <small>{help}</small> : null}{error ? <em>{error}</em> : null}</div>;
-}
-
-function imageFromAsset(asset: UploadedAsset, fileName: string): UploadedImage {
-  return { assetId: asset.id, imageUrl: asset.imageUrl, fileName, sizeBytes: asset.sizeBytes };
-}
-
-function auctionMoney(amount: number | ''): Money {
-  return { amount: Math.max(0, Math.round(Number(amount || 0) * 100)), currency: 'CNY' };
-}
-
-function optionalMoney(amount: number | ''): Money | undefined {
-  if (amount === '') return undefined;
-  return auctionMoney(amount);
-}
-
-function buildTrustCards(form: FormState): CreateLotRequest['trustCards'] {
-  return TRUST_CARD_DEFS.flatMap((card) => {
-    const draft = form.trustCards[card.key];
-    if (!draft.content.trim() && !draft.imageUrl.trim()) return [];
-    return [{
-      id: `${card.key}-card`,
-      type: card.type,
-      title: card.title,
-      content: draft.content.trim(),
-      ...(draft.imageUrl.trim() ? { imageUrl: draft.imageUrl.trim() } : {}),
-    }];
-  });
-}
-
-function toRequest(form: FormState, roomId: string): CreateLotRequest {
-  const request: CreateLotRequest = {
-    roomId,
-    title: form.title.trim(),
-    description: form.description.trim(),
-    imageUrl: form.imageUrl.trim(),
-    rule: {
-      startPrice: auctionMoney(form.startPrice),
-      minIncrement: auctionMoney(form.minIncrement),
-      ...(form.capPrice !== '' ? { capPrice: auctionMoney(form.capPrice) } : {}),
-      durationSeconds: form.durationSeconds,
-      antiSnipeWindowSeconds: form.antiSnipeWindowSeconds,
-      antiSnipeExtendSeconds: form.antiSnipeExtendSeconds,
-      maxExtendCount: form.maxExtendCount,
-    },
-    trustCards: buildTrustCards(form),
-    galleryImageUrls: form.gallery.map((image) => image.imageUrl),
-    category: form.category.trim(),
-    tags: parseTags(form.tags),
-    stock: form.stock,
-    afterSaleNotes: form.afterSaleNotes.trim(),
-    depositAmount: auctionMoney(form.depositAmount),
-  };
-  const estimatePrice = optionalMoney(form.estimatePrice);
-  if (estimatePrice) request.estimatePrice = estimatePrice;
-  return request;
-}
-
-function validate(form: FormState): FormIssue[] {
-  const issues: FormIssue[] = [];
-  if (!form.title.trim()) issues.push({ level: 'error', step: 'product', text: '拍品名称必填' });
-  if (!form.category.trim()) issues.push({ level: 'error', step: 'product', text: form.categoryMode === 'custom' ? '请填写自定义分类' : '请选择拍品分类' });
-  if (!form.imageUrl.trim()) issues.push({ level: 'error', step: 'product', text: '主图必须上传' });
-  if (form.imageUrl && !isHTTPImageURL(form.imageUrl)) issues.push({ level: 'error', step: 'product', text: '主图必须是 TOS 返回的 http/https URL' });
-  form.gallery.forEach((image, index) => {
-    if (!isHTTPImageURL(image.imageUrl)) issues.push({ level: 'error', step: 'product', text: `轮播图 ${index + 1} 不是稳定 URL` });
-  });
-  if (form.gallery.length > 6) issues.push({ level: 'error', step: 'product', text: '轮播图最多 6 张' });
-  for (const card of TRUST_CARD_DEFS) {
-    const imageURL = form.trustCards[card.key].imageUrl;
-    if (imageURL && !isHTTPImageURL(imageURL)) issues.push({ level: 'error', step: 'briefing', text: `${card.label}图片不是稳定 URL` });
-  }
-  if (!form.description.trim()) issues.push({ level: 'error', step: 'product', text: '拍品介绍必填' });
-  if (form.stock < 1) issues.push({ level: 'error', step: 'product', text: '库存必须大于等于 1' });
-  if (form.minIncrement <= 0) issues.push({ level: 'error', step: 'rules', text: '加价幅度必须大于 0' });
-  if (form.depositAmount < 0) issues.push({ level: 'error', step: 'rules', text: '保证金不能小于 0' });
-  if (form.durationSeconds < 60) issues.push({ level: 'error', step: 'rules', text: '竞拍时长必须大于等于 60 秒' });
-  if (form.antiSnipeWindowSeconds <= 0) issues.push({ level: 'error', step: 'rules', text: '延时窗口必须大于 0 秒' });
-  if (form.antiSnipeExtendSeconds < 10 || form.antiSnipeExtendSeconds > 30) issues.push({ level: 'error', step: 'rules', text: '每次延长必须在 10-30 秒之间' });
-  if (form.maxExtendCount <= 0) issues.push({ level: 'error', step: 'rules', text: '最大延时次数必须大于 0' });
-  if (form.capPrice !== '' && form.capPrice <= form.startPrice) issues.push({ level: 'error', step: 'rules', text: '封顶价必须大于起拍价' });
-  if (!buildTrustCards(form).length) issues.push({ level: 'warning', step: 'briefing', text: '建议至少补充一张讲解卡' });
-  return issues;
-}
-
-function isHTTPImageURL(value: string) {
-  if (value.startsWith('blob:') || value.startsWith('data:')) return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function parseTags(value: string) {
-  return value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean);
-}
-
-function stepIndex(stepKey: StepKey) {
-  return STEP_DEFS.findIndex((step) => step.key === stepKey);
-}
-
-function isBlockingIssue(issue: FormIssue) {
-  return issue.level === 'error';
-}
-
-function issueText(issues: FormIssue[], keyword: string) {
-  return issues.find((issue) => issue.text.includes(keyword))?.text;
-}
-
-function shortURL(value: string) {
-  if (value.length <= 54) return value;
-  return `${value.slice(0, 28)}...${value.slice(-18)}`;
 }

@@ -1,8 +1,0 @@
-name: docs
-on: [push, pull_request]
-jobs:
-  check-docs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: test -f docs/openclaw/v1/01-需求草案.md

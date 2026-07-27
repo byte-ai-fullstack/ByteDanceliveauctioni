@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { Lot } from '../../../shared/api/types';
 import { isAuthRequiredError } from '../../../shared/api/errors';
@@ -39,12 +39,12 @@ export function DepositPayModal({
     addresses.find((address) => address.id === selectedAddressId) ?? getDefaultDeliveryAddress(addresses)
   ), [addresses, selectedAddressId]);
 
-  const handleAuthError = (reason: unknown): boolean => {
+  const handleAuthError = useCallback((reason: unknown): boolean => {
     if (!isAuthRequiredError(reason)) return false;
     setError('');
     onAuthRequired?.(reason);
     return true;
-  };
+  }, [onAuthRequired]);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,7 +62,7 @@ export function DepositPayModal({
     return () => {
       cancelled = true;
     };
-  }, [onAuthRequired]);
+  }, [handleAuthError]);
 
   const refreshAddresses = (next: DeliveryAddress[]) => {
     setAddresses(next);

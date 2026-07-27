@@ -254,8 +254,7 @@ LIVE_AUCTION_E2E_BASE_URL=http://127.0.0.1:18080 go test ./test/e2e -count=1 -v
 | `app/auction/service/test/auction_biz_test.go` | 使用 test store 验证状态机、并发出价、成交、订单、支付、事件隐私等业务闭环。 |
 | `app/auction/service/test/ai_assistant_test.go` | 验证买家 AI 查询候选和公开可见性，依赖 service/usecase test store。 |
 | `app/auction/service/test/idgen_test.go` | 验证 snowflake ID 生成和并发安全。 |
-| `app/auction/service/internal/**/_test.go` | 同包单元/集成测试，覆盖私有转换、worker、repo、hub、cluster、storage 等内部行为。 |
-| `app/auction/service/cmd/shard_gateway/*_test.go` | 同包测试 gateway admin handler 和路由逻辑。 |
+| `app/auction/service/internal/**/_test.go` | 同包单元/集成测试，覆盖私有转换、worker、repo、hub、storage 等内部行为。 |
 
 后续如果继续“迁移删除”，原则是先在 `test/e2e` 或其他黑盒层补到同等契约，再删旧测试；不能把依赖私有函数的同包测试直接搬到顶层。
 
@@ -281,7 +280,7 @@ go test ./...
 
 实跑结果：
 
-- `docker compose ps`：`live-auction-bid-backend`、MySQL、Redis、Consul 均为 healthy。
+- `docker compose ps`：gateway、auction-service、核心 worker、MySQL、Redis、Kafka、NATS 均为 healthy。
 - `/healthz`、`/readyz`：均返回 `ok=true`。
 - `LIVE_AUCTION_E2E_BASE_URL=http://127.0.0.1:18080 go test ./test/e2e -count=1 -v`：PASS。
 - `go test ./...`：PASS；未设置 `LIVE_AUCTION_E2E_BASE_URL` 时 e2e 包按设计 skip 真实 HTTP。

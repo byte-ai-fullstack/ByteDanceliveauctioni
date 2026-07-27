@@ -2,34 +2,35 @@ services:
   auction-backend:
     environment:
       AUCTION_INSTANCE_ID: "auction-backend-1"
-      AUCTION_REALTIME_BUS: "${AUCTION_REALTIME_BUS:-redis}"
-      AUCTION_REALTIME_BUS_CHANNEL: "${AUCTION_REALTIME_BUS_CHANNEL:-auction:realtime:events}"
+      AUCTION_NATS_URLS: "${AUCTION_NATS_URLS:?AUCTION_NATS_URLS is required}"
+      AUCTION_NATS_CLIENT_NAME: "live-auction-perf-backend-1"
 
   auction-backend-2:
-    image: live-auction-bid-backend:prod
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
     container_name: live-auction-bid-backend-2
     env_file:
       - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
     environment:
       AUCTION_HTTP_ADDR: ":18080"
+      AUCTION_COMMAND_GRPC_TARGET: "dns:///auction-service:19090"
+      AUCTION_COMMAND_GRPC_TIMEOUT: "${AUCTION_COMMAND_GRPC_TIMEOUT:-3s}"
       AUCTION_INSTANCE_ID: "auction-backend-2"
-      AUCTION_REALTIME_BUS: "${AUCTION_REALTIME_BUS:-redis}"
-      AUCTION_REALTIME_BUS_CHANNEL: "${AUCTION_REALTIME_BUS_CHANNEL:-auction:realtime:events}"
+      AUCTION_NATS_URLS: "${AUCTION_NATS_URLS:?AUCTION_NATS_URLS is required}"
+      AUCTION_NATS_CLIENT_NAME: "live-auction-perf-backend-2"
       AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
       AUCTION_REDIS_ADDR: "redis:6379"
       AUCTION_REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
-      AUCTION_CONSUL_ADDR: "consul:8500"
-      AUCTION_SERVICE_NAME: "auction-backend"
-      AUCTION_SERVICE_ADDR: "auction-backend-2"
       AUCTION_JWT_ISSUER: "auction-backend"
     ports:
       - "127.0.0.1:18081:18080"
     depends_on:
+      auction-service:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      consul:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18080/readyz"]
@@ -40,30 +41,31 @@ services:
       - live-auction
 
   auction-backend-3:
-    image: live-auction-bid-backend:prod
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
     container_name: live-auction-bid-backend-3
     env_file:
       - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
     environment:
       AUCTION_HTTP_ADDR: ":18080"
+      AUCTION_COMMAND_GRPC_TARGET: "dns:///auction-service:19090"
+      AUCTION_COMMAND_GRPC_TIMEOUT: "${AUCTION_COMMAND_GRPC_TIMEOUT:-3s}"
       AUCTION_INSTANCE_ID: "auction-backend-3"
-      AUCTION_REALTIME_BUS: "${AUCTION_REALTIME_BUS:-redis}"
-      AUCTION_REALTIME_BUS_CHANNEL: "${AUCTION_REALTIME_BUS_CHANNEL:-auction:realtime:events}"
+      AUCTION_NATS_URLS: "${AUCTION_NATS_URLS:?AUCTION_NATS_URLS is required}"
+      AUCTION_NATS_CLIENT_NAME: "live-auction-perf-backend-3"
       AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
       AUCTION_REDIS_ADDR: "redis:6379"
       AUCTION_REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
-      AUCTION_CONSUL_ADDR: "consul:8500"
-      AUCTION_SERVICE_NAME: "auction-backend"
-      AUCTION_SERVICE_ADDR: "auction-backend-3"
       AUCTION_JWT_ISSUER: "auction-backend"
     ports:
       - "127.0.0.1:18082:18080"
     depends_on:
+      auction-service:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      consul:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18080/readyz"]

@@ -1,4 +1,4 @@
-import type { RoleCode, UserStatus } from '../../../shared/api/types';
+import type { RoleCode, User, UserStatus } from '../../../shared/api/types';
 import { ROLE_CODE, USER_STATUS } from '../../../shared/api/types';
 import type { StudioTone } from '../../../pages/host-console/components/studio-ui';
 
@@ -8,7 +8,7 @@ export const ROLE_CODE_FILTERS: Array<{ label: string; value: RoleCode | '' }> =
   { label: '运营子账号', value: ROLE_CODE.OPERATOR },
 ];
 
-export const ROLE_CODE_OPTIONS: Array<{ roleCode: RoleCode; label: string; hint: string; tone: StudioTone }> = [
+const ROLE_CODE_OPTIONS: Array<{ roleCode: RoleCode; label: string; hint: string; tone: StudioTone }> = [
   { roleCode: ROLE_CODE.MERCHANT_OWNER, label: '主账号', hint: '对应一个主播或商家主体，可管理自己的团队子账号', tone: 'purple' },
   { roleCode: ROLE_CODE.ANCHOR, label: '主播 / 场控', hint: '可进入工作台并执行开拍、控场、落锤等操作', tone: 'success' },
   { roleCode: ROLE_CODE.OPERATOR, label: '运营子账号', hint: '可进入后台协助拍品、队列和成交处理', tone: 'info' },
@@ -28,6 +28,10 @@ export function primaryRoleCode(roleCodes?: readonly string[] | null): string {
   return roleCodes[0] || '';
 }
 
+export function isManagedTeamUser(user: Pick<User, 'roleCodes'>) {
+  return user.roleCodes.some((roleCode) => roleCode === ROLE_CODE.ANCHOR || roleCode === ROLE_CODE.OPERATOR);
+}
+
 export function roleCodeMeta(roleCode?: RoleCode | string | null) {
   return ROLE_CODE_OPTIONS.find((item) => item.roleCode === roleCode) ?? {
     roleCode: String(roleCode || ''),
@@ -37,7 +41,7 @@ export function roleCodeMeta(roleCode?: RoleCode | string | null) {
   };
 }
 
-export const USER_STATUS_OPTIONS: Array<{ status: UserStatus; label: string; hint: string; tone: StudioTone }> = [
+const USER_STATUS_OPTIONS: Array<{ status: UserStatus; label: string; hint: string; tone: StudioTone }> = [
   { status: USER_STATUS.ACTIVE, label: '启用中', hint: '可以登录后台并操作授权功能', tone: 'success' },
   { status: USER_STATUS.DISABLED, label: '已停用', hint: '不能登录，已有会话会被后端撤销', tone: 'danger' },
 ];

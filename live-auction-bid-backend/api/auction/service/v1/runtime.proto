@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package auction.service.v1;
+
+option go_package = "live-auction-bid/backend/api/auction/service/v1;v1";
+
+import "auction/service/v1/auction.proto";
+
+// RuntimeCommandType identifies the Redis Lua command that produced a fact.
+enum RuntimeCommandType {
+  RUNTIME_COMMAND_TYPE_UNSPECIFIED = 0;
+  RUNTIME_COMMAND_TYPE_START_LOT = 1;
+  RUNTIME_COMMAND_TYPE_PLACE_BID = 2;
+  RUNTIME_COMMAND_TYPE_CANCEL_LOT = 3;
+  RUNTIME_COMMAND_TYPE_CLOSE_IF_EXPIRED = 4;
+  RUNTIME_COMMAND_TYPE_SYNC_LOT_CONFIG = 5;
+}
+
+// RuntimeRankingItemV1 is the bounded internal Top-N ranking stored in a fact.
+message RuntimeRankingItemV1 {
+  int32 rank = 1;
+  string user_id = 2;
+  string masked_nickname = 3;
+  string avatar_url = 4;
+  int64 amount_fen = 5;
+  int64 bid_at_unix_ms = 6;
+}
+
+// LotRuntimeStateV1 is the complete core state after one atomic adjudication.
+message LotRuntimeStateV1 {
+  string lot_id = 1;
+  string room_id = 2;
+  LotStatus status = 3;
+  string currency = 4;
+  int64 start_price_fen = 5;
+  int64 min_increment_fen = 6;
+  optional int64 cap_price_fen = 7;
+  int64 current_price_fen = 8;
+  string leading_user_id = 9;
+  string leading_nickname = 10;
+  string winner_user_id = 11;
+  string winner_nickname = 12;
+  int64 final_price_fen = 13;
+  int64 started_at_unix_ms = 14;
+  int64 ends_at_unix_ms = 15;
+  int64 settled_at_unix_ms = 16;
+  int64 cancelled_at_unix_ms = 17;
+  string cancel_reason = 18;
+  int64 bid_count = 19;
+  int64 participant_count = 20;
+  int32 extend_count = 21;
+  int32 max_extend_count = 22;
+  string order_id = 23;
+  repeated RuntimeRankingItemV1 top_ranking = 24;
+  optional int64 duration_ms = 25;
+  optional int64 anti_snipe_window_ms = 26;
+  optional int64 anti_snipe_extend_ms = 27;
+}
+
+// AcceptedBidV1 is present only when an accepted bid was part of the command.
+message AcceptedBidV1 {
+  string bid_id = 1;
+  string user_id = 2;
+  string nickname = 3;
+  string avatar_url = 4;
+  int64 amount_fen = 5;
+  int64 accepted_at_unix_ms = 6;
+}
+
+// OrderDraftV1 contains only immutable data needed to create the auction order.
+message OrderDraftV1 {
+  string order_id = 1;
+  string lot_id = 2;
+  string room_id = 3;
+  string main_account_id = 4;
+  string buyer_user_id = 5;
+  string buyer_nickname = 6;
+  string title = 7;
+  string image_url = 8;
+  int64 total_amount_fen = 9;
+  string currency = 10;
+  int64 created_at_unix_ms = 11;
+}
+
+// RuntimeFactV1 is the ordered source of truth published to the Runtime Topic.
+message RuntimeFactV1 {
+  string event_id = 1;
+  string trace_id = 2;
+  string lot_id = 3;
+  string room_id = 4;
+  int64 prev_lot_version = 5;
+  int64 lot_version = 6;
+  int64 occurred_at_unix_ms = 7;
+  int64 config_version = 8;
+  RuntimeCommandType command = 9;
+  LotRuntimeStateV1 state_after = 10;
+  optional AcceptedBidV1 accepted_bid = 11;
+  optional OrderDraftV1 order_draft = 12;
+  string idempotency_key = 13;
+  uint32 schema_version = 14;
+}

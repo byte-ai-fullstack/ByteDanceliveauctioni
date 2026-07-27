@@ -1,0 +1,279 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {"expr": "up{job=~\"kafka|redis|nats|mysql|elasticsearch|pgvector|node\"}", "legendFormat": "{{job}}", "refId": "A"}
+      ],
+      "title": "Target exporter health",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "id": 2,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "kafka_brokers", "legendFormat": "brokers", "refId": "A"},
+        {"expr": "sum(kafka_topic_partition_under_replicated_partition)", "legendFormat": "under replicated", "refId": "B"}
+      ],
+      "title": "Kafka broker and replica safety",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "id": 3,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "max by (consumergroup, topic) (kafka_consumergroup_lag)", "legendFormat": "{{consumergroup}} · {{topic}}", "refId": "A"}
+      ],
+      "title": "Kafka consumer lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": [{"matcher": {"id": "byName", "options": "memory"}, "properties": [{"id": "unit", "value": "bytes"}]}]},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "id": 4,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "redis_memory_used_bytes", "legendFormat": "memory", "refId": "A"},
+        {"expr": "redis_connected_slaves", "legendFormat": "replicas", "refId": "B"},
+        {"expr": "increase(redis_evicted_keys_total[5m])", "legendFormat": "evictions/5m", "refId": "C"}
+      ],
+      "title": "Redis memory, replicas and evictions",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "gnatsd_varz_connections", "legendFormat": "connections", "refId": "A"},
+        {"expr": "gnatsd_varz_routes", "legendFormat": "routes", "refId": "B"},
+        {"expr": "gnatsd_varz_slow_consumers", "legendFormat": "slow consumers", "refId": "C"}
+      ],
+      "title": "NATS connections, routes and slow consumers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "id": 6,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "mysql_global_status_threads_connected / mysql_global_variables_max_connections", "legendFormat": "connection utilization", "refId": "A"}
+      ],
+      "title": "MySQL connection utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "id": 7,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "elasticsearch_cluster_health_status", "legendFormat": "ES {{color}}", "refId": "A"},
+        {"expr": "pg_up", "legendFormat": "pgvector up", "refId": "B"},
+        {"expr": "sum(pg_stat_database_numbackends)", "legendFormat": "pgvector connections", "refId": "C"}
+      ],
+      "title": "Search storage health",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never"}, "max": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.75}, {"color": "red", "value": 0.85}]}, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 29},
+      "id": 8,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "1 - (node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|nsfs|tracefs\",mountpoint!~\"^/(dev|proc|sys|run)($|/)\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|nsfs|tracefs\",mountpoint!~\"^/(dev|proc|sys|run)($|/)\"})", "legendFormat": "host {{instance}} · {{mountpoint}}", "refId": "A"},
+        {"expr": "(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) and on(namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes > 0)", "legendFormat": "pvc {{namespace}}/{{persistentvolumeclaim}}", "refId": "B"}
+      ],
+      "title": "Durable filesystem and PVC utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 37},
+      "id": 9,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (sink, result) (rate(auction_search_reconcile_total[5m]))", "legendFormat": "{{sink}} · {{result}} /s", "refId": "A"},
+        {"expr": "sum by (sink) (increase(auction_search_index_stale_total[15m]))", "legendFormat": "{{sink}} drift /15m", "refId": "B"},
+        {"expr": "sum by (result) (increase(auction_search_repair_total[15m]))", "legendFormat": "repair {{result}} /15m", "refId": "C"},
+        {"expr": "time() - auction_search_reconcile_last_success_unixtime", "legendFormat": "seconds since successful page", "refId": "D"}
+      ],
+      "title": "Search reconciliation and automatic repair",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 45},
+      "id": 10,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (model, source) (rate(auction_embedding_tokens_estimate_total[5m]))", "legendFormat": "{{model}} · {{source}} tokens/s", "refId": "A"},
+        {"expr": "sum by (model) (auction_embedding_cost_estimate_total)", "legendFormat": "{{model}} estimated cost", "refId": "B"}
+      ],
+      "title": "Embedding usage and configured cost estimate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never"}, "max": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.75}, {"color": "red", "value": 0.85}]}, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 53},
+      "id": 11,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "host {{instance}}", "refId": "A"},
+        {"expr": "(redis_memory_used_bytes / redis_memory_max_bytes) and on(instance) (redis_memory_max_bytes > 0)", "legendFormat": "redis {{instance}}", "refId": "B"},
+        {"expr": "elasticsearch_jvm_memory_used_bytes{area=\"heap\"} / ignoring(area) elasticsearch_jvm_memory_max_bytes", "legendFormat": "es {{node}} heap", "refId": "C"}
+      ],
+      "title": "Durable-store memory pressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never"}, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5000}, {"color": "red", "value": 30000}]}, "unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 61},
+      "id": 12,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "auction_order_visibility_lag_ms", "legendFormat": "{{instance}}", "refId": "A"}
+      ],
+      "title": "Order CREATING visibility lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 69},
+      "id": 13,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "auction_nats_subscriptions{job=\"gateway\"}", "legendFormat": "{{instance}} subscriptions", "refId": "A"},
+        {"expr": "sum by (instance) (max by (instance, room_id) (auction_ws_connections{job=\"gateway\"}) > bool 0)", "legendFormat": "{{instance}} viewed rooms", "refId": "B"}
+      ],
+      "title": "Gateway NATS subscriptions vs viewed rooms",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "max": 1, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 77},
+      "id": 14,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "auction_projection_gate_ready{job=\"auction-service\"}", "legendFormat": "{{instance}} ready", "refId": "A"},
+        {"expr": "auction_projection_gate_state{job=\"auction-service\"}", "legendFormat": "{{instance}} · {{reason}}", "refId": "B"}
+      ],
+      "title": "End-to-end projection gate state",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 77},
+      "id": 15,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "auction_projection_gate_lag_records{job=\"auction-service\"}", "legendFormat": "{{instance}} total", "refId": "A"},
+        {"expr": "auction_projection_gate_max_partition_lag_records{job=\"auction-service\"}", "legendFormat": "{{instance}} max partition", "refId": "B"}
+      ],
+      "title": "Kafka to MySQL projection lag records",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never"}, "min": 0, "unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 85},
+      "id": 16,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "auction_projection_gate_oldest_age_ms{job=\"auction-service\"}", "legendFormat": "{{instance}} oldest", "refId": "A"},
+        {"expr": "auction_projection_gate_snapshot_age_ms{job=\"auction-service\"}", "legendFormat": "{{instance}} snapshot", "refId": "B"},
+        {"expr": "auction_projection_gate_retention_headroom_ms{job=\"auction-service\"}", "legendFormat": "{{instance}} retention headroom", "refId": "C"}
+      ],
+      "title": "Projection age and retention headroom",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "min": 0, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 85},
+      "id": 17,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (reason) (rate(auction_projection_gate_rejection_total{job=\"auction-service\"}[5m]))", "legendFormat": "{{reason}}", "refId": "A"}
+      ],
+      "title": "Projection gate command rejection rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never"}, "min": 0, "unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 93},
+      "id": 18,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (le, source) (rate(auction_search_retrieval_duration_ms_bucket{result=\"ok\"}[$__rate_interval])))", "legendFormat": "{{source}} p99", "refId": "A"},
+        {"expr": "vector(1000)", "legendFormat": "SLO 1000ms", "refId": "B"}
+      ],
+      "title": "Buyer indexed-search retrieval p99",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["live-auction", "infrastructure", "l2"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Live Auction · Target Infrastructure",
+  "uid": "live-auction-target-infra",
+  "version": 1,
+  "weekStart": ""
+}

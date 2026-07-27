@@ -36,6 +36,7 @@ const (
 	ResultCodeAddressNotFound              int32 = 409111
 	ResultCodeUserNotFound                 int32 = 404001
 	ResultCodePaymentProviderNotConfigured int32 = 500101
+	ResultCodeOverloaded                   int32 = 503001
 	ResultCodeInternalError                int32 = 500000
 
 	ResultCodeUnauthenticated  = ResultCodeLoginRequired
@@ -142,6 +143,8 @@ func resultCodeForBusinessCode(code apperr.BusinessCode) int32 {
 		return ResultCodeAddressNotFound
 	case apperr.CodePaymentProviderNotConfigured:
 		return ResultCodePaymentProviderNotConfigured
+	case apperr.CodeOverloaded:
+		return ResultCodeOverloaded
 	default:
 		return ResultCodeInvalidArgument
 	}

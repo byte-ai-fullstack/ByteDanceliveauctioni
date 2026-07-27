@@ -3191,6 +3191,15 @@
           },
           "paidAtUnixMs": {
             "$ref": "#/components/schemas/Int64"
+          },
+          "shopName": {
+            "type": "string"
+          },
+          "enrichmentStatus": {
+            "type": "string"
+          },
+          "enrichmentUpdatedAtUnixMs": {
+            "$ref": "#/components/schemas/Int64"
           }
         }
       },
@@ -4292,6 +4301,12 @@
             "items": {
               "$ref": "#/components/schemas/UnifiedOrderItem"
             }
+          },
+          "enrichmentStatus": {
+            "type": "string"
+          },
+          "enrichmentUpdatedAtUnixMs": {
+            "$ref": "#/components/schemas/Int64"
           }
         }
       },

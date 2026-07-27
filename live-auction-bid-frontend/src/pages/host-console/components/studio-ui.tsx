@@ -1,10 +1,11 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { type ButtonHTMLAttributes, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import type { StudioToastItem } from './studio-toast';
 
 export type StudioTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info' | 'purple';
-export type StudioButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'soft';
-export type StudioSize = 'sm' | 'md' | 'lg';
+type StudioButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'soft';
+type StudioSize = 'sm' | 'md' | 'lg';
 
 type StudioButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: StudioButtonVariant;
@@ -134,23 +135,11 @@ export function StudioEmptyState({ icon, title, description, action, tone = 'neu
   return <div className={`studioState studioState-empty studioState-${tone} ${compact ? 'studioState-compact' : ''} ${className}`.trim()}>{icon ? <span className="studioStateIcon">{icon}</span> : null}<h3>{title}</h3>{description ? <p>{description}</p> : null}{action ? <div className="studioStateAction">{action}</div> : null}</div>;
 }
 
-export function StudioLoadingState({ icon, title, description, action, tone = 'info', compact = false, className = '' }: StudioStateProps) {
-  return <div className={`studioState studioState-loading studioState-${tone} ${compact ? 'studioState-compact' : ''} ${className}`.trim()}><span className="studioStateIcon">{icon || <span className="studioStateSpinner" />}</span><h3>{title}</h3>{description ? <p>{description}</p> : null}{action ? <div className="studioStateAction">{action}</div> : null}</div>;
-}
-
 export function StudioErrorState({ icon, title, description, action, tone = 'danger', compact = false, className = '' }: StudioStateProps) {
   return <div className={`studioState studioState-error studioState-${tone} ${compact ? 'studioState-compact' : ''} ${className}`.trim()}>{icon ? <span className="studioStateIcon">{icon}</span> : null}<h3>{title}</h3>{description ? <p>{description}</p> : null}{action ? <div className="studioStateAction">{action}</div> : null}</div>;
 }
 
-export type StudioToastItem = {
-  id: string;
-  tone?: StudioTone;
-  title: ReactNode;
-  description?: ReactNode;
-  action?: ReactNode;
-};
-
-export function StudioToast({ tone = 'info', title, description, action, className = '' }: Omit<StudioStateProps, 'icon' | 'compact'>) {
+function StudioToast({ tone = 'info', title, description, action, className = '' }: Omit<StudioStateProps, 'icon' | 'compact'>) {
   return <div className={`studioToast studioToast-${tone} ${className}`.trim()} role={tone === 'danger' ? 'alert' : 'status'}><i /> <div><strong>{title}</strong>{description ? <span>{description}</span> : null}</div>{action ? <div className="studioToastAction">{action}</div> : null}</div>;
 }
 
@@ -158,22 +147,6 @@ export function StudioToastViewport({ toasts, className = '' }: { toasts: Studio
   if (!toasts.length) return null;
   const viewport = <div className={`studioToastViewport ${className}`.trim()}>{toasts.map((toast) => <StudioToast key={toast.id} tone={toast.tone || 'info'} title={toast.title} description={toast.description} action={toast.action} />)}</div>;
   return typeof document === 'undefined' ? viewport : createPortal(viewport, document.body);
-}
-
-export function useStudioToast(timeoutMs = 4200) {
-  const [toasts, setToasts] = useState<StudioToastItem[]>([]);
-  const showToast = (toast: Omit<StudioToastItem, 'id'> & { id?: string }) => {
-    const id = toast.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setToasts((current) => [...current.filter((item) => item.id !== id), { ...toast, id }]);
-    return id;
-  };
-  const dismissToast = (id: string) => setToasts((current) => current.filter((toast) => toast.id !== id));
-  useEffect(() => {
-    if (!toasts.length) return;
-    const timers = toasts.map((toast) => window.setTimeout(() => dismissToast(toast.id), timeoutMs));
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [toasts, timeoutMs]);
-  return { toasts, showToast, dismissToast };
 }
 
 export function StudioTableSkeleton({ rows = 5, columns = 6, className = '' }: { rows?: number; columns?: number; className?: string }) {

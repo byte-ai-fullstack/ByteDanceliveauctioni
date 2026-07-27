@@ -115,7 +115,7 @@ func (h *uploadHandler) handleImageUpload(w http.ResponseWriter, r *http.Request
 		writeUploadError(w, http.StatusBadRequest, r.Context(), fmt.Errorf("%w: file is required", apperr.ErrInvalidArgument), err)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	logUploadInfo("upload_image.file_received", requestID, "file_name", filepath.Base(header.Filename), "declared_size", header.Size, "content_type", header.Header.Get("Content-Type"))
 
 	dataBytes, err := io.ReadAll(io.LimitReader(file, maxImageUploadBytes+1))

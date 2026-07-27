@@ -16,10 +16,12 @@ const (
 	CodeLotCancelled                 BusinessCode = "LOT_CANCELLED"
 	CodeRoomActiveLotExists          BusinessCode = "ROOM_ACTIVE_LOT_EXISTS"
 	CodeProjectionPending            BusinessCode = "PROJECTION_PENDING"
+	CodeOrderEnrichmentPending       BusinessCode = "ORDER_ENRICHMENT_PENDING"
 	CodeAddressRequired              BusinessCode = "ADDRESS_REQUIRED"
 	CodeAddressNotFound              BusinessCode = "ADDRESS_NOT_FOUND"
 	CodeDepositRequired              BusinessCode = "DEPOSIT_REQUIRED"
 	CodePaymentProviderNotConfigured BusinessCode = "PAYMENT_PROVIDER_NOT_CONFIGURED"
+	CodeOverloaded                   BusinessCode = "OVERLOADED"
 )
 
 // ErrLotVersionConflict is the stable sentinel for optimistic-lock conflicts on a lot aggregate.
@@ -42,6 +44,7 @@ var (
 	ErrQueuePositionConflict        = errors.New("queue position conflict")
 	ErrRuntimeProjectionGap         = errors.New("runtime projection gap")
 	ErrRuntimeProjectionConflict    = errors.New("runtime projection conflict")
+	ErrOrderEnrichmentPending       = errors.New(string(CodeOrderEnrichmentPending))
 	ErrUsernameTaken                = errors.New("username already exists")
 	ErrInvalidCredentials           = errors.New("invalid username or password")
 	ErrInvalidToken                 = errors.New("invalid token")
@@ -54,6 +57,7 @@ var (
 	ErrAddressNotFound              = errors.New(string(CodeAddressNotFound))
 	ErrDepositRequired              = errors.New(string(CodeDepositRequired))
 	ErrPaymentProviderNotConfigured = errors.New(string(CodePaymentProviderNotConfigured))
+	ErrOverloaded                   = errors.New(string(CodeOverloaded))
 )
 
 func IsLotVersionConflict(err error) bool {
@@ -80,6 +84,8 @@ func BusinessCodeForError(err error) BusinessCode {
 		return CodeRoomActiveLotExists
 	case errors.Is(err, ErrRuntimeProjectionGap), errors.Is(err, ErrRuntimeProjectionConflict):
 		return CodeProjectionPending
+	case errors.Is(err, ErrOrderEnrichmentPending):
+		return CodeOrderEnrichmentPending
 	case errors.Is(err, ErrAddressRequired):
 		return CodeAddressRequired
 	case errors.Is(err, ErrAddressNotFound):
@@ -88,6 +94,8 @@ func BusinessCodeForError(err error) BusinessCode {
 		return CodeDepositRequired
 	case errors.Is(err, ErrPaymentProviderNotConfigured):
 		return CodePaymentProviderNotConfigured
+	case errors.Is(err, ErrOverloaded):
+		return CodeOverloaded
 	case errors.Is(err, ErrBidRejected):
 		return CodeBidRejected
 	}
@@ -114,6 +122,8 @@ func ErrorForBusinessCode(code string) error {
 		return ErrRoomActiveLotExists
 	case CodeProjectionPending:
 		return ErrRuntimeProjectionGap
+	case CodeOrderEnrichmentPending:
+		return ErrOrderEnrichmentPending
 	case CodeAddressRequired:
 		return ErrAddressRequired
 	case CodeAddressNotFound:
@@ -122,6 +132,8 @@ func ErrorForBusinessCode(code string) error {
 		return ErrDepositRequired
 	case CodePaymentProviderNotConfigured:
 		return ErrPaymentProviderNotConfigured
+	case CodeOverloaded:
+		return ErrOverloaded
 	case CodeBidRejected:
 		return ErrBidRejected
 	default:

@@ -4,7 +4,7 @@ package auction.service.v1;
 
 option go_package = "live-auction-bid/backend/api/auction/service/v1;v1";
 
-import "api/auction/service/v1/auction.proto";
+import "auction/service/v1/auction.proto";
 import "google/api/annotations.proto";
 
 // UserService 管理直播竞拍账号、登录态和 RBAC 权限。

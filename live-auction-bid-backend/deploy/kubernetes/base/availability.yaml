@@ -1,0 +1,127 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: auction-gateway}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: auction-gateway}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: auction-service}
+spec:
+  minAvailable: 6
+  selector: {matchLabels: {app.kubernetes.io/name: auction-service}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: outbox-relay}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: outbox-relay}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: projector}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/name: projector}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: domain-relay}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/name: domain-relay}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: enrichment-consumer}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/name: enrichment-consumer}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: close-worker}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/name: close-worker}}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: auction-gateway
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: auction-gateway}
+  minReplicas: 3
+  maxReplicas: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 60}
+        - {type: Pods, value: 4, periodSeconds: 60}
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - {type: Percent, value: 10, periodSeconds: 60}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 65}
+    - type: Pods
+      pods:
+        metric: {name: auction_ws_connections_total_per_pod}
+        target: {type: AverageValue, averageValue: "4000"}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-http
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: auction-gateway}}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 18080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-auction-service
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: auction-service}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: auction-gateway}}
+      ports: [{protocol: TCP, port: 19090}]
+    - from:
+        - namespaceSelector: {matchLabels: {live-auction.io/observability-access: "true"}}
+      ports: [{protocol: TCP, port: 18086}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-observability
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/tier: event-worker}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {live-auction.io/observability-access: "true"}}
+      ports:
+        - {protocol: TCP, port: 18082}
+        - {protocol: TCP, port: 18083}
+        - {protocol: TCP, port: 18084}
+        - {protocol: TCP, port: 18085}
+        - {protocol: TCP, port: 18087}

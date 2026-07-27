@@ -7,22 +7,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"live-auction-bid/backend/app/auction/service/internal/observability"
 )
 
 const defaultDashScopeBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 type EmbeddingConfig struct {
-	Provider   string
-	BaseURL    string
-	Model      string
-	APIKey     string
-	Dimensions int
-	Timeout    time.Duration
-	BatchSize  int
+	Provider             string
+	BaseURL              string
+	Model                string
+	ModelVersion         string
+	APIKey               string
+	Dimensions           int
+	Timeout              time.Duration
+	BatchSize            int
+	CostPerMillionTokens float64
 }
 
 type EmbeddingClient struct {
@@ -43,6 +49,10 @@ func NewEmbeddingClient(cfg EmbeddingConfig) *EmbeddingClient {
 	if cfg.Model == "" {
 		cfg.Model = DefaultEmbeddingModel
 	}
+	cfg.ModelVersion = strings.TrimSpace(cfg.ModelVersion)
+	if cfg.ModelVersion == "" {
+		cfg.ModelVersion = cfg.Model
+	}
 	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
 	cfg.Dimensions = NormalizeDimensions(cfg.Dimensions)
 	if cfg.Timeout <= 0 {
@@ -50,6 +60,9 @@ func NewEmbeddingClient(cfg EmbeddingConfig) *EmbeddingClient {
 	}
 	if cfg.BatchSize <= 0 || cfg.BatchSize > DefaultEmbeddingBatchSize {
 		cfg.BatchSize = DefaultEmbeddingBatchSize
+	}
+	if cfg.CostPerMillionTokens < 0 || math.IsNaN(cfg.CostPerMillionTokens) || math.IsInf(cfg.CostPerMillionTokens, 0) {
+		cfg.CostPerMillionTokens = 0
 	}
 	return &EmbeddingClient{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout}}
 }
@@ -62,13 +75,15 @@ func NewEmbeddingClientFromEnv(getenv func(string) string) *EmbeddingClient {
 		}
 	}
 	return NewEmbeddingClient(EmbeddingConfig{
-		Provider:   getenv("AUCTION_EMBEDDING_PROVIDER"),
-		BaseURL:    getenv("AUCTION_EMBEDDING_BASE_URL"),
-		Model:      getenv("AUCTION_EMBEDDING_MODEL"),
-		APIKey:     getenv("AUCTION_EMBEDDING_API_KEY"),
-		Dimensions: parsePositiveInt(getenv("AUCTION_EMBEDDING_DIMENSIONS"), DefaultEmbeddingDimensions),
-		Timeout:    timeout,
-		BatchSize:  parsePositiveInt(getenv("AUCTION_EMBEDDING_BATCH_SIZE"), DefaultEmbeddingBatchSize),
+		Provider:             getenv("AUCTION_EMBEDDING_PROVIDER"),
+		BaseURL:              getenv("AUCTION_EMBEDDING_BASE_URL"),
+		Model:                getenv("AUCTION_EMBEDDING_MODEL"),
+		ModelVersion:         getenv("AUCTION_EMBEDDING_MODEL_VERSION"),
+		APIKey:               getenv("AUCTION_EMBEDDING_API_KEY"),
+		Dimensions:           parsePositiveInt(getenv("AUCTION_EMBEDDING_DIMENSIONS"), DefaultEmbeddingDimensions),
+		Timeout:              timeout,
+		BatchSize:            parsePositiveInt(getenv("AUCTION_EMBEDDING_BATCH_SIZE"), DefaultEmbeddingBatchSize),
+		CostPerMillionTokens: parseNonNegativeFloat(getenv("AUCTION_EMBEDDING_COST_PER_MILLION_TOKENS"), 0),
 	})
 }
 
@@ -84,6 +99,20 @@ func (c *EmbeddingClient) Model() string {
 		return DefaultEmbeddingModel
 	}
 	return c.cfg.Model
+}
+
+func (c *EmbeddingClient) Provider() string {
+	if c == nil {
+		return "dashscope"
+	}
+	return c.cfg.Provider
+}
+
+func (c *EmbeddingClient) ModelVersion() string {
+	if c == nil || strings.TrimSpace(c.cfg.ModelVersion) == "" {
+		return c.Model()
+	}
+	return c.cfg.ModelVersion
 }
 
 func (c *EmbeddingClient) Dimensions() int {
@@ -137,7 +166,7 @@ func (c *EmbeddingClient) Embed(ctx context.Context, texts []string) ([][]float6
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, err
@@ -150,6 +179,10 @@ func (c *EmbeddingClient) Embed(ctx context.Context, texts []string) ([][]float6
 			Embedding []float64 `json:"embedding"`
 			Index     int       `json:"index"`
 		} `json:"data"`
+		Usage struct {
+			PromptTokens int `json:"prompt_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, err
@@ -172,6 +205,14 @@ func (c *EmbeddingClient) Embed(ctx context.Context, texts []string) ([][]float6
 			return nil, fmt.Errorf("embedding provider omitted index %d", i)
 		}
 	}
+	tokens, source := envelope.Usage.PromptTokens, "provider"
+	if tokens <= 0 {
+		tokens = envelope.Usage.TotalTokens
+	}
+	if tokens <= 0 {
+		tokens, source = estimateEmbeddingTokens(cleaned), "estimated"
+	}
+	observability.RecordEmbeddingUsage(c.Model(), source, tokens, c.cfg.CostPerMillionTokens)
 	return out, nil
 }
 
@@ -193,4 +234,26 @@ func parsePositiveInt(raw string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func parseNonNegativeFloat(raw string, fallback float64) float64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return fallback
+	}
+	return value
+}
+
+func estimateEmbeddingTokens(texts []string) int {
+	total := 0
+	for _, text := range texts {
+		if count := utf8.RuneCountInString(strings.TrimSpace(text)); count > 0 {
+			total += count
+		}
+	}
+	return total
 }

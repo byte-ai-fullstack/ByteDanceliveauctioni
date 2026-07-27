@@ -22,12 +22,28 @@ import (
 // 分层规则：这里只做 proto 入参组装、调用 usecase、包装 proto reply，不写竞拍业务规则。
 type AuctionService struct {
 	v1.UnimplementedAuctionServiceServer
-	auction       *auction.AuctionUsecase
-	presence      RoomPresenceProvider
-	ai            *aiassistant.Assistant
-	buyerSearch   *searchindex.PGVectorIndex
-	buyerEmbedder *searchindex.EmbeddingClient
-	verboseBidLog bool
+	auction            *auction.AuctionUsecase
+	presence           RoomPresenceProvider
+	ai                 *aiassistant.Assistant
+	buyerKeywords      buyerKeywordSearch
+	buyerVectors       buyerVectorSearch
+	buyerEmbedder      buyerEmbeddingClient
+	buyerSearchTimeout time.Duration
+	verboseBidLog      bool
+}
+
+type buyerKeywordSearch interface {
+	SearchKeywords(ctx context.Context, query searchindex.KeywordSearchQuery) ([]searchindex.LotDocument, error)
+}
+
+type buyerVectorSearch interface {
+	Search(ctx context.Context, query searchindex.SearchQuery) ([]searchindex.LotDocument, error)
+	RandomPublicDocuments(ctx context.Context, limit int) ([]searchindex.LotDocument, error)
+}
+
+type buyerEmbeddingClient interface {
+	Configured() bool
+	Embed(ctx context.Context, texts []string) ([][]float64, error)
 }
 
 type RoomPresenceProvider interface {
@@ -320,6 +336,22 @@ func (s *AuctionService) GetRoomSnapshot(ctx context.Context, req *v1.GetRoomSna
 		return &v1.GetRoomSnapshotReply{Result: ErrorResult(ctx, err)}, nil
 	}
 	return &v1.GetRoomSnapshotReply{Result: okResult(ctx), Snapshot: auction.SnapshotForViewer(snapshot, lotResultViewerFromContext(ctx))}, nil
+}
+
+func (s *AuctionService) GetRoomPersonalState(ctx context.Context, req *v1.GetRoomPersonalStateRequest) (*v1.GetRoomPersonalStateReply, error) {
+	claims, err := auth.RequireUser(ctx)
+	if err != nil {
+		return &v1.GetRoomPersonalStateReply{Result: ErrorResult(ctx, err)}, nil
+	}
+	state, err := s.auction.GetRoomPersonalState(ctx, req.GetRoomId(), claims.UserID)
+	if err != nil {
+		return &v1.GetRoomPersonalStateReply{Result: ErrorResult(ctx, err)}, nil
+	}
+	return &v1.GetRoomPersonalStateReply{
+		Result:        okResult(ctx),
+		PersonalState: state.State,
+		RetryAfterMs:  state.RetryAfterMs,
+	}, nil
 }
 
 func (s *AuctionService) GetRoomPresence(ctx context.Context, req *v1.GetRoomPresenceRequest) (*v1.GetRoomPresenceReply, error) {

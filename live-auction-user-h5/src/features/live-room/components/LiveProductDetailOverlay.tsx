@@ -83,19 +83,25 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-export function LiveProductDetailOverlay({
-  controller,
-  lot,
-  liveSource,
-  onClose,
-  onSelectLot,
-}: {
+type LiveProductDetailOverlayProps = {
   controller: LiveRoomController;
   lot: Lot;
   liveSource: string;
   onClose: () => void;
   onSelectLot: (lot: Lot) => void;
-}) {
+};
+
+export function LiveProductDetailOverlay(props: LiveProductDetailOverlayProps) {
+  return <LiveProductDetailOverlayContent key={props.lot.id} {...props} />;
+}
+
+function LiveProductDetailOverlayContent({
+  controller,
+  lot,
+  liveSource,
+  onClose,
+  onSelectLot,
+}: LiveProductDetailOverlayProps) {
   const rootRef = useRef<HTMLElement | null>(null);
   const sheetRef = useRef<HTMLElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -145,7 +151,6 @@ export function LiveProductDetailOverlay({
     bidAuthPanelOpen,
     buyerAuth,
     currentLot,
-    depositPrompt,
     room,
     roomName,
     wsState,
@@ -168,11 +173,12 @@ export function LiveProductDetailOverlay({
     [auctionPanel.lots, lot.id],
   );
   const galleryImages = useMemo(() => galleryImagesForLot(lot), [lot]);
-  const activeHeroImage = galleryImages[heroImageIndex] || lot.imageUrl || '';
+  const activeHeroImageIndex = clamp(heroImageIndex, 0, Math.max(galleryImages.length - 1, 0));
+  const activeHeroImage = galleryImages[activeHeroImageIndex] || lot.imageUrl || '';
   const trustCards = lot.trustCards?.filter((card) => card.revealed !== false || hasTrustCardContent(card)) || [];
   const effectiveSearchProgress = sheetMode === 'expanded' ? searchHeaderProgress : 0;
   const galleryTrackStyle = {
-    transform: `translate3d(calc(${-heroImageIndex * 100}% + ${Math.round(heroDragOffset)}px), 0, 0)`,
+    transform: `translate3d(calc(${-activeHeroImageIndex * 100}% + ${Math.round(heroDragOffset)}px), 0, 0)`,
     transition: heroDragOffset ? 'none' : undefined,
   } as CSSProperties;
   const rootStyle = {
@@ -192,38 +198,12 @@ export function LiveProductDetailOverlay({
   }, []);
 
   useEffect(() => {
-    setSearchHeaderProgress(0);
-    setMiniOffset({ x: 0, y: 0 });
-    setHeroImageIndex(0);
-    setHeroDragOffset(0);
     scrollRef.current?.scrollTo({ top: 0 });
-  }, [lot.id]);
+  }, []);
 
-  useEffect(() => {
-    setHeroImageIndex((index) => clamp(index, 0, Math.max(galleryImages.length - 1, 0)));
-    setHeroDragOffset(0);
-  }, [galleryImages.length]);
-
-  useEffect(() => {
-    if (sheetMode !== 'expanded') setSearchHeaderProgress(0);
-  }, [sheetMode]);
-
-  useEffect(() => {
-    if (!depositPrompt) return;
-    setBidSheetOpen(false);
-    setBidSheetTip('');
-    setBidSheetBidAttempted(false);
-    if (bidAuthPanelOpen) actions.closeBuyerAuthPanel();
-  }, [depositPrompt?.lot.id]);
-
-  useEffect(() => {
-    if (!bidSheetOpen) {
-      setBidSheetTip('');
-      setBidSheetBidAttempted(false);
-      return;
-    }
-    if (bidSheetBidAttempted && controller.bidError) setBidSheetTip(controller.bidError);
-  }, [bidSheetBidAttempted, bidSheetOpen, controller.bidError]);
+  const visibleBidSheetTip = bidSheetBidAttempted && controller.bidError
+    ? controller.bidError
+    : bidSheetTip;
 
   useEffect(() => {
     const miniVideo = miniVideoRef.current;
@@ -378,6 +358,7 @@ export function LiveProductDetailOverlay({
       onClose();
       return;
     }
+    if (nextMode !== 'expanded') setSearchHeaderProgress(0);
     setSheetMode(nextMode);
   };
 
@@ -554,8 +535,8 @@ export function LiveProductDetailOverlay({
       drag.mode = galleryImages.length > 1 && Math.abs(deltaX) > Math.abs(deltaY) * 1.15 ? 'carousel' : 'sheet';
     }
     if (drag.mode === 'carousel') {
-      const atStart = heroImageIndex === 0 && deltaX > 0;
-      const atEnd = heroImageIndex === galleryImages.length - 1 && deltaX < 0;
+      const atStart = activeHeroImageIndex === 0 && deltaX > 0;
+      const atEnd = activeHeroImageIndex === galleryImages.length - 1 && deltaX < 0;
       setHeroDragOffset(clamp(atStart || atEnd ? deltaX * 0.34 : deltaX, -drag.width, drag.width));
       event.preventDefault();
       return;
@@ -673,7 +654,7 @@ export function LiveProductDetailOverlay({
             <i>{displayStateLabel(displayState)}</i>
             {galleryImages.length > 1 ? (
               <>
-                <b className="liveProductDetailGalleryCount">{heroImageIndex + 1}/{galleryImages.length}</b>
+                <b className="liveProductDetailGalleryCount">{activeHeroImageIndex + 1}/{galleryImages.length}</b>
                 <div
                   className="liveProductDetailGalleryDots"
                   aria-label="商品图片分页"
@@ -686,7 +667,7 @@ export function LiveProductDetailOverlay({
                     <button
                       type="button"
                       key={`${imageUrl}-dot`}
-                      className={index === heroImageIndex ? 'active' : ''}
+                      className={index === activeHeroImageIndex ? 'active' : ''}
                       aria-label={`查看第 ${index + 1} 张商品图`}
                       onClick={() => {
                         setHeroImageIndex(index);
@@ -804,7 +785,7 @@ export function LiveProductDetailOverlay({
                   serverTimeReceivedAtUnixMs={room.serverTimeReceivedAtUnixMs}
                   displayState={displayState}
                 />
-                {bidSheetTip ? <p className="bidSheetInlineNotice" role="alert">{bidSheetTip}</p> : null}
+                {visibleBidSheetTip ? <p className="bidSheetInlineNotice" role="alert">{visibleBidSheetTip}</p> : null}
                 <BidPanel
                   lot={lot}
                   loading={controller.isBidPending}

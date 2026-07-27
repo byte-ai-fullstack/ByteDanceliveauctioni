@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-http v2.9.2
 // - protoc             v4.25.8
-// source: api/auction/service/v1/auction.proto
+// source: auction/service/v1/auction.proto
 
 package v1
 
@@ -25,6 +25,7 @@ const OperationAuctionServiceCreateLot = "/auction.service.v1.AuctionService/Cre
 const OperationAuctionServiceCreateLotDraft = "/auction.service.v1.AuctionService/CreateLotDraft"
 const OperationAuctionServiceGetLot = "/auction.service.v1.AuctionService/GetLot"
 const OperationAuctionServiceGetLotResultView = "/auction.service.v1.AuctionService/GetLotResultView"
+const OperationAuctionServiceGetRoomPersonalState = "/auction.service.v1.AuctionService/GetRoomPersonalState"
 const OperationAuctionServiceGetRoomPresence = "/auction.service.v1.AuctionService/GetRoomPresence"
 const OperationAuctionServiceGetRoomSnapshot = "/auction.service.v1.AuctionService/GetRoomSnapshot"
 const OperationAuctionServiceListAdminAuctionOrders = "/auction.service.v1.AuctionService/ListAdminAuctionOrders"
@@ -73,6 +74,11 @@ type AuctionServiceHTTPServer interface {
 	GetLot(context.Context, *GetLotRequest) (*GetLotReply, error)
 	// GetLotResultView 查询拍品结果。
 	GetLotResultView(context.Context, *GetLotResultRequest) (*GetLotResultReply, error)
+	// GetRoomPersonalState 获取当前买家在房间当前版本上的私有覆盖状态。
+	//
+	// 调用方：已登录观众端。
+	// 用途：私人 WebSocket 增量丢失、订单仍在投影时，只恢复当前用户状态。
+	GetRoomPersonalState(context.Context, *GetRoomPersonalStateRequest) (*GetRoomPersonalStateReply, error)
 	// GetRoomPresence 获取直播间在线状态。
 	//
 	// 调用方：主播端/运营端。
@@ -175,6 +181,7 @@ func RegisterAuctionServiceHTTPServer(s *http.Server, srv AuctionServiceHTTPServ
 	r.GET("/api/rooms", _AuctionService_ListPublicRoomList0_HTTP_Handler(srv))
 	r.GET("/api/ai/buyer/suggestions", _AuctionService_ListBuyerSuggestions0_HTTP_Handler(srv))
 	r.POST("/api/ai/buyer/consult", _AuctionService_ConsultBuyer0_HTTP_Handler(srv))
+	r.GET("/api/rooms/{room_id}/me", _AuctionService_GetRoomPersonalState0_HTTP_Handler(srv))
 }
 
 func _AuctionService_CreateLot0_HTTP_Handler(srv AuctionServiceHTTPServer) func(ctx http.Context) error {
@@ -705,6 +712,28 @@ func _AuctionService_ConsultBuyer0_HTTP_Handler(srv AuctionServiceHTTPServer) fu
 	}
 }
 
+func _AuctionService_GetRoomPersonalState0_HTTP_Handler(srv AuctionServiceHTTPServer) func(ctx http.Context) error {
+	return func(ctx http.Context) error {
+		var in GetRoomPersonalStateRequest
+		if err := ctx.BindQuery(&in); err != nil {
+			return err
+		}
+		if err := ctx.BindVars(&in); err != nil {
+			return err
+		}
+		http.SetOperation(ctx, OperationAuctionServiceGetRoomPersonalState)
+		h := ctx.Middleware(func(ctx context.Context, req interface{}) (interface{}, error) {
+			return srv.GetRoomPersonalState(ctx, req.(*GetRoomPersonalStateRequest))
+		})
+		out, err := h(ctx, &in)
+		if err != nil {
+			return err
+		}
+		reply := out.(*GetRoomPersonalStateReply)
+		return ctx.Result(200, reply)
+	}
+}
+
 type AuctionServiceHTTPClient interface {
 	// CancelLot 主播异常取消拍品。
 	//
@@ -734,6 +763,11 @@ type AuctionServiceHTTPClient interface {
 	GetLot(ctx context.Context, req *GetLotRequest, opts ...http.CallOption) (rsp *GetLotReply, err error)
 	// GetLotResultView 查询拍品结果。
 	GetLotResultView(ctx context.Context, req *GetLotResultRequest, opts ...http.CallOption) (rsp *GetLotResultReply, err error)
+	// GetRoomPersonalState 获取当前买家在房间当前版本上的私有覆盖状态。
+	//
+	// 调用方：已登录观众端。
+	// 用途：私人 WebSocket 增量丢失、订单仍在投影时，只恢复当前用户状态。
+	GetRoomPersonalState(ctx context.Context, req *GetRoomPersonalStateRequest, opts ...http.CallOption) (rsp *GetRoomPersonalStateReply, err error)
 	// GetRoomPresence 获取直播间在线状态。
 	//
 	// 调用方：主播端/运营端。
@@ -910,6 +944,23 @@ func (c *AuctionServiceHTTPClientImpl) GetLotResultView(ctx context.Context, in 
 	pattern := "/api/lots/{lot_id}/result"
 	path := binding.EncodeURL(pattern, in, true)
 	opts = append(opts, http.Operation(OperationAuctionServiceGetLotResultView))
+	opts = append(opts, http.PathTemplate(pattern))
+	err := c.cc.Invoke(ctx, "GET", path, nil, &out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetRoomPersonalState 获取当前买家在房间当前版本上的私有覆盖状态。
+//
+// 调用方：已登录观众端。
+// 用途：私人 WebSocket 增量丢失、订单仍在投影时，只恢复当前用户状态。
+func (c *AuctionServiceHTTPClientImpl) GetRoomPersonalState(ctx context.Context, in *GetRoomPersonalStateRequest, opts ...http.CallOption) (*GetRoomPersonalStateReply, error) {
+	var out GetRoomPersonalStateReply
+	pattern := "/api/rooms/{room_id}/me"
+	path := binding.EncodeURL(pattern, in, true)
+	opts = append(opts, http.Operation(OperationAuctionServiceGetRoomPersonalState))
 	opts = append(opts, http.PathTemplate(pattern))
 	err := c.cc.Invoke(ctx, "GET", path, nil, &out, opts...)
 	if err != nil {

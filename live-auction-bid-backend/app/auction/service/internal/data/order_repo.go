@@ -6,107 +6,10 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 	v1 "live-auction-bid/backend/api/auction/service/v1"
 	"live-auction-bid/backend/app/auction/service/internal/biz/auction"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/apperr"
 )
-
-func (s *Store) CreateOrderForSettledLot(ctx context.Context, order auction.Order, lot *v1.Lot, expectedLotVersion int64, events []v1.AuctionEvent) error {
-	if lot == nil {
-		return errors.New("lot is required")
-	}
-	if expectedLotVersion <= 0 {
-		return errors.New("lot expected version is required")
-	}
-	lotModel, err := lotToModel(lot)
-	if err != nil {
-		return err
-	}
-	orderModel, itemModel, err := auctionOrderToUserModels(order)
-	if err != nil {
-		return err
-	}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockRoomStateForTerminalLot(ctx, tx, lot); err != nil {
-			return err
-		}
-		var current AuctionLotModel
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ?", lot.Id).
-			First(&current).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return apperr.ErrNotFound
-			}
-			return err
-		}
-		if current.Version != expectedLotVersion {
-			return apperr.ErrLotVersionConflict
-		}
-		result := tx.Model(&AuctionLotModel{}).
-			Where("id = ? AND version = ?", lot.Id, expectedLotVersion).
-			Select("*").
-			Omit("created_at").
-			Updates(lotModel)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return apperr.ErrLotVersionConflict
-		}
-		if err := releaseActiveLotIfTerminal(ctx, tx, lot); err != nil {
-			return err
-		}
-		if err := s.fillAuctionOrderShopName(ctx, tx, orderModel); err != nil {
-			return err
-		}
-		if err := tx.Create(orderModel).Error; err != nil {
-			return err
-		}
-		if err := tx.Create(itemModel).Error; err != nil {
-			return err
-		}
-		return createEventModels(ctx, tx, events)
-	}); err != nil {
-		return err
-	}
-	return s.streamEvents(ctx, events)
-}
-
-func (s *Store) fillAuctionOrderShopName(ctx context.Context, tx *gorm.DB, orderModel *UserOrderModel) error {
-	if orderModel == nil || orderModel.Source != userOrderSourceAuction {
-		return nil
-	}
-	name, err := s.auctionShopNameForMainAccount(ctx, tx, orderModel.MainAccountID)
-	if err != nil {
-		return err
-	}
-	orderModel.ShopName = name
-	return nil
-}
-
-func (s *Store) auctionShopNameForMainAccount(ctx context.Context, tx *gorm.DB, mainAccountID string) (string, error) {
-	mainAccountID = strings.TrimSpace(mainAccountID)
-	if mainAccountID == "" {
-		return "直播竞拍", nil
-	}
-	var user AuctionUserModel
-	if err := tx.WithContext(ctx).
-		Where("id = ?", mainAccountID).
-		First(&user).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "直播竞拍", nil
-		}
-		return "", err
-	}
-	if name := strings.TrimSpace(user.Nickname); name != "" {
-		return name, nil
-	}
-	if name := strings.TrimSpace(user.Username); name != "" {
-		return name, nil
-	}
-	return "直播竞拍", nil
-}
 
 func (s *Store) FindOrderByID(ctx context.Context, orderID string) (*auction.Order, error) {
 	if orderID == "" {
@@ -121,11 +24,14 @@ func (s *Store) FindOrderByID(ctx context.Context, orderID string) (*auction.Ord
 		}
 		return nil, err
 	}
-	items, err := s.findUserOrderItems(ctx, model.ID)
+	orders, err := s.auctionOrdersFromUserModels(ctx, []UserOrderModel{model})
 	if err != nil {
 		return nil, err
 	}
-	return userModelToAuctionOrderWithItem(&model, items)
+	if len(orders) != 1 {
+		return nil, errors.New("auction order composition returned an unexpected result count")
+	}
+	return &orders[0], nil
 }
 
 func (s *Store) FindOrderByLot(ctx context.Context, lotID string) (*auction.Order, bool, error) {
@@ -230,7 +136,7 @@ func (s *Store) FindPaymentByIdempotencyKey(ctx context.Context, orderID, key st
 	return payment, err == nil, err
 }
 
-func (s *Store) CommitPaymentSuccess(ctx context.Context, payment auction.Payment, order auction.Order, expectedOrderVersion int64, events []v1.AuctionEvent) error {
+func (s *Store) CommitPaymentSuccess(ctx context.Context, payment auction.Payment, order auction.Order, expectedOrderVersion int64, events []*v1.AuctionEvent) error {
 	if expectedOrderVersion <= 0 {
 		return errors.New("order expected version is required")
 	}
@@ -242,7 +148,7 @@ func (s *Store) CommitPaymentSuccess(ctx context.Context, payment auction.Paymen
 	if err != nil {
 		return err
 	}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(paymentModel).Error; err != nil {
 			return err
 		}
@@ -266,21 +172,7 @@ func (s *Store) CommitPaymentSuccess(ctx context.Context, payment auction.Paymen
 			return apperr.ErrLotVersionConflict
 		}
 		return createEventModels(ctx, tx, events)
-	}); err != nil {
-		return err
-	}
-	return s.streamEvents(ctx, events)
-}
-
-func (s *Store) findUserOrderItems(ctx context.Context, orderID string) ([]UserOrderItemModel, error) {
-	var items []UserOrderItemModel
-	if err := s.db.WithContext(ctx).
-		Where("order_id = ?", orderID).
-		Order("id ASC").
-		Find(&items).Error; err != nil {
-		return nil, err
-	}
-	return items, nil
+	})
 }
 
 func (s *Store) auctionOrdersFromUserModels(ctx context.Context, models []UserOrderModel) ([]auction.Order, error) {
@@ -295,10 +187,18 @@ func (s *Store) auctionOrdersFromUserModels(ctx context.Context, models []UserOr
 	if err != nil {
 		return nil, err
 	}
+	enrichments, err := s.orderEnrichmentsByOrderID(ctx, models)
+	if err != nil {
+		return nil, err
+	}
 	orders := make([]auction.Order, 0, len(models))
 	for i := range models {
 		order, err := userModelToAuctionOrderWithItem(&models[i], itemsByOrder[models[i].ID])
 		if err != nil {
+			return nil, err
+		}
+		enrichment, found := enrichments[models[i].ID]
+		if err := applyAuctionOrderEnrichment(order, enrichment, found); err != nil {
 			return nil, err
 		}
 		orders = append(orders, *order)
@@ -322,22 +222,4 @@ func (s *Store) userOrderItemsByOrderID(ctx context.Context, orderIDs []string) 
 		itemsByOrder[item.OrderID] = append(itemsByOrder[item.OrderID], item)
 	}
 	return itemsByOrder, nil
-}
-
-func createUserOrderWithItemsIgnoringDuplicates(ctx context.Context, tx *gorm.DB, orderModel *UserOrderModel, itemModels ...*UserOrderItemModel) error {
-	if orderModel == nil {
-		return nil
-	}
-	if err := tx.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(orderModel).Error; err != nil {
-		return err
-	}
-	for _, itemModel := range itemModels {
-		if itemModel == nil {
-			continue
-		}
-		if err := tx.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(itemModel).Error; err != nil {
-			return err
-		}
-	}
-	return nil
 }

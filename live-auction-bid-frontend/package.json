@@ -3,10 +3,23 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "lint": "eslint .",
+    "lint:admin": "eslint src/app src/entities src/features src/pages/host-console src/pages/login src/shared src/test tests playwright.config.ts vite.config.ts vitest.config.ts",
+    "knip": "knip",
+    "test": "vitest run",
+    "test:dom": "vitest run src/pages/host-console/HostConsolePage.dom.test.tsx",
+    "test:visual": "playwright test --grep @visual",
+    "test:visual:update": "playwright test --grep @visual --update-snapshots",
+    "prebaseline:admin": "npm run build",
+    "baseline:admin": "playwright test --grep @baseline --project desktop-1440",
+    "check:visual-lock": "node scripts/check-visual-lock.mjs",
     "check:ui-debt": "../scripts/check-ui-debt.sh",
-    "generate:api": "openapi-typescript ../live-auction-bid-backend/openapi/auction.openapi.json -o src/shared/api/generated/auction.schema.ts"
+    "generate:openapi": "openapi-typescript ../live-auction-bid-backend/openapi/auction.openapi.json -o src/shared/api/generated/auction.schema.ts",
+    "generate:realtime": "node scripts/generate-realtime-contract.mjs",
+    "generate:api": "npm run generate:openapi && npm run generate:realtime"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.101.4",
     "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
     "react": "latest",
@@ -15,8 +28,20 @@
     "vite": "latest"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.60.0",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^24.13.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "openapi-typescript": "^7.13.0"
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
+    "globals": "^17.7.0",
+    "jsdom": "^29.1.1",
+    "knip": "^6.29.0",
+    "openapi-typescript": "^7.13.0",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10"
   }
 }

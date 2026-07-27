@@ -151,6 +151,7 @@ function applyPublicEvent(state: AuctionRoomState, event: AuctionSocketEvent): A
     return {
       ...base,
       ...withLot(base, event.lot),
+      ...withRanking(base, event.ranking),
       localOptimistic: cancelled ? { ...base.localOptimistic, pendingBid: undefined } : base.localOptimistic,
     };
   }
@@ -167,6 +168,7 @@ function applyPublicEvent(state: AuctionRoomState, event: AuctionSocketEvent): A
   if (event.type === AUCTION_EVENT_TYPE.RANKING_UPDATED) {
     return {
       ...base,
+      ...withLot(base, event.lot),
       ...withRanking(base, event.ranking),
     };
   }

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { FormEvent, PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import {
   Archive,
   ChevronLeft,
@@ -15,8 +15,9 @@ import {
 import { formatShopMoney, listMyFrequentStores, listUserOrders, mockPayUserOrder } from '../features/shop/api/shopApi';
 import type { FrequentStore, ShopOrderStatus, UserOrder, UserOrderItem } from '../features/shop/api/shopApi';
 import { isAuthRequiredError } from '../shared/api/errors';
-import { normalizeBuyerUsername, validateBuyerCredentials } from '../shared/auth/credentialRules';
+import { BuyerAuthSheet } from '../shared/auth/BuyerAuthSheet';
 import { useAuthSession } from '../shared/auth/useAuthSession';
+import { createIdempotencyKey } from '../shared/lib/idempotency';
 import { navigateTo } from '../shared/navigation';
 import './shop-replica.css';
 
@@ -118,7 +119,7 @@ type ShopOrdersContentProps = {
 };
 
 export function ShopOrdersContent({ embedded = false, onBack, initialFrom, onSheetDragStart }: ShopOrdersContentProps) {
-  const { user, loginBuyer, registerBuyer, resetBuyerPassword, reason } = useAuthSession();
+  const { user } = useAuthSession();
   const params = new URLSearchParams(window.location.search);
   const initialStatus = params.get('status') || '';
   const from = initialFrom ?? params.get('from') ?? '';
@@ -131,20 +132,15 @@ export function ShopOrdersContent({ embedded = false, onBack, initialFrom, onShe
   const [error, setError] = useState('');
   const [payingId, setPayingId] = useState('');
   const [toolsOpen, setToolsOpen] = useState(false);
-  const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
-  const [authUsername, setAuthUsername] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [authNickname, setAuthNickname] = useState('');
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authError, setAuthError] = useState('');
   const requiresAuth = !user;
+  const userID = user?.id ?? '';
 
   const filteredOrders = useMemo(() => (
     activeStatus ? orders.filter((order) => order.status === activeStatus) : orders
   ), [activeStatus, orders]);
 
-  const loadOrders = () => {
-    if (!user) {
+  const loadOrders = useCallback(() => {
+    if (!userID) {
       setOrders([]);
       setError('');
       setLoading(false);
@@ -161,60 +157,37 @@ export function ShopOrdersContent({ embedded = false, onBack, initialFrom, onShe
         setOrders([]);
       })
       .finally(() => setLoading(false));
-  };
+  }, [activeStatus, submittedQuery, userID]);
 
-  useEffect(loadOrders, [activeStatus, submittedQuery, user?.id]);
+  useEffect(() => {
+    const timer = window.setTimeout(loadOrders, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadOrders]);
 
-  const loadFrequentStores = () => {
-    if (!user) {
+  const loadFrequentStores = useCallback(() => {
+    if (!userID) {
       setFrequentStores([]);
       return;
     }
     listMyFrequentStores({ limit: 10 })
       .then((reply) => setFrequentStores(reply.stores))
       .catch(() => setFrequentStores([]));
-  };
+  }, [userID]);
 
-  useEffect(loadFrequentStores, [user?.id]);
-
-  const submitAuth = async (event: FormEvent) => {
-    event.preventDefault();
-    if (authBusy) return;
-    const validationError = validateBuyerCredentials({
-      username: authUsername,
-      password: authPassword,
-      nickname: authNickname,
-      requireNickname: authMode === 'register',
-    });
-    if (validationError) {
-      setAuthError(validationError);
-      return;
-    }
-
-    setAuthBusy(true);
-    setAuthError('');
-    try {
-      const username = normalizeBuyerUsername(authUsername);
-      if (authMode === 'reset') {
-        await resetBuyerPassword(username, authPassword);
-        setAuthMode('login');
-        setAuthPassword('');
-        setAuthError('密码已重置，请用新密码登录');
-        return;
-      }
-      if (authMode === 'login') await loginBuyer(username, authPassword);
-      else await registerBuyer(username, authPassword, authNickname.trim());
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : '登录失败，请重试');
-    } finally {
-      setAuthBusy(false);
-    }
-  };
+  useEffect(() => {
+    const timer = window.setTimeout(loadFrequentStores, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadFrequentStores]);
 
   const handlePay = async (order: UserOrder) => {
     setPayingId(order.id);
     try {
-      const result = await mockPayUserOrder(order.id, `h5-order-pay-${order.id}-${Date.now()}`, order.totalAmount, order.currency);
+      const result = await mockPayUserOrder(
+        order.id,
+        createIdempotencyKey('h5-order-pay', order.id),
+        order.totalAmount,
+        order.currency,
+      );
       setOrders((current) => current.map((item) => (item.id === order.id ? result.order : item)));
       loadFrequentStores();
       setError('');
@@ -306,6 +279,14 @@ export function ShopOrdersContent({ embedded = false, onBack, initialFrom, onShe
       {!requiresAuth && error ? <section className="dyMallOrdersNotice">{error}</section> : null}
       {!requiresAuth && loading ? <section className="dyMallOrdersNotice">正在同步订单...</section> : null}
 
+      {requiresAuth ? (
+        <section className="dyMallOrderEmpty dyMallOrderEmptyAuth">
+          <ShoppingBag size={58} />
+          <h1>暂无订单</h1>
+          <p>登录后会同步你的订单、地址和支付状态。</p>
+        </section>
+      ) : null}
+
       {!requiresAuth && filteredOrders.length === 0 ? (
         <section className="dyMallOrderEmpty">
           <ShoppingBag size={58} />
@@ -355,28 +336,12 @@ export function ShopOrdersContent({ embedded = false, onBack, initialFrom, onShe
         ))}
       </section> : null}
       {requiresAuth ? (
-        <div className="dyMallOrderAuthMask" role="presentation">
-          <section className="dyMallOrderAuthSheet" aria-modal="true" role="dialog" aria-label="登录后查看我的订单">
-            <h2>登录后查看我的订单</h2>
-            <p>订单、地址和支付状态会按当前买家账号隔离。</p>
-            <nav aria-label="登录方式">
-              <button type="button" className={authMode === 'login' ? 'isActive' : ''} onClick={() => setAuthMode('login')}>登录</button>
-              <button type="button" className={authMode === 'register' ? 'isActive' : ''} onClick={() => setAuthMode('register')}>注册</button>
-              <button type="button" className={authMode === 'reset' ? 'isActive' : ''} onClick={() => setAuthMode('reset')}>重置</button>
-            </nav>
-            <form onSubmit={submitAuth}>
-              <input value={authUsername} onChange={(event) => setAuthUsername(event.target.value)} placeholder="请输入账号" autoComplete="username" />
-              <input value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="请输入密码" type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} />
-              {authMode === 'register' ? (
-                <input value={authNickname} onChange={(event) => setAuthNickname(event.target.value)} placeholder="请输入昵称" autoComplete="nickname" />
-              ) : null}
-              {(authError || reason) ? <p role="alert">{authError || reason}</p> : null}
-              <button type="submit" disabled={authBusy}>
-                {authBusy ? '处理中...' : authMode === 'login' ? '登录并查看订单' : authMode === 'reset' ? '重置密码' : '注册并查看订单'}
-              </button>
-            </form>
-          </section>
-        </div>
+        <BuyerAuthSheet
+          title="登录后查看我的订单"
+          description="订单、地址和支付状态会按当前买家账号隔离。"
+          actionLabel="查看订单"
+          onClose={handleBack}
+        />
       ) : null}
       {toolsOpen ? (
         <div className="dyMallOrderToolsMask" role="presentation">

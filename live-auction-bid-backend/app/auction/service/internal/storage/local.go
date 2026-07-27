@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -58,10 +59,20 @@ func (s *LocalStorage) PutObject(ctx context.Context, input PutObjectInput) (*St
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = file.Close()
+			_ = os.Remove(target)
+		}
+	}()
 	if _, err := io.Copy(file, input.Reader); err != nil {
 		return nil, err
 	}
+	if err := file.Close(); err != nil {
+		return nil, fmt.Errorf("close local object %q: %w", input.ObjectKey, err)
+	}
+	committed = true
 	publicURL := input.ObjectKey
 	if s.publicBaseURL != "" {
 		publicURL = s.publicBaseURL + "/" + strings.TrimLeft(input.ObjectKey, "/")

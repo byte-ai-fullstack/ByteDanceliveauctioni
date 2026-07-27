@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useState, type FormEvent } from 'react';
 import { AlertTriangle, Ban, CheckCircle2, ChevronLeft, ChevronRight, KeyRound, Pencil, Plus, Power, RefreshCw, Search, ShieldAlert, ShieldCheck, UserCog, Users } from 'lucide-react';
 import { currentAuth } from '../auth/api/authApi';
-import { adminCreateUser, adminResetUserPassword, adminUpdateUserRole, adminUpdateUserStatus, listAdminUsers, type AdminUsersQuery } from '../admin-user/api/adminUserApi';
-import { hasPermission, isManagedTeamRole, PERMISSION_CODE, ROLE_CODE, USER_STATUS, type RoleCode, type User, type UserStatus } from '../../shared/api/types';
+import { adminCreateUser, adminResetUserPassword, adminUpdateUserRole, adminUpdateUserStatus, type AdminUsersQuery } from '../admin-user/api/adminUserApi';
+import { hasPermission, PERMISSION_CODE, ROLE_CODE, USER_STATUS, type RoleCode, type User, type UserStatus } from '../../shared/api/types';
 import { resultMessage } from '../../shared/api/result';
 import { formatDateTimeText } from '../../shared/lib/format';
-import { primaryRoleCode, ROLE_CODE_FILTERS, roleCodeMeta, TEAM_ACCOUNT_ROLE_OPTIONS, USER_STATUS_FILTERS, userStatusMeta } from '../../entities/user/model/userRole';
-import { StudioBadge, StudioButton, StudioCard, StudioDialog, StudioDrawer, StudioEmptyState, StudioField, StudioMetricCard, StudioPageHeader, StudioTable, StudioTableSkeleton, StudioToastViewport, useStudioToast } from '../../pages/host-console/components/studio-ui';
+import { isManagedTeamUser, primaryRoleCode, ROLE_CODE_FILTERS, roleCodeMeta, TEAM_ACCOUNT_ROLE_OPTIONS, USER_STATUS_FILTERS, userStatusMeta } from '../../entities/user/model/userRole';
+import { StudioBadge, StudioButton, StudioCard, StudioDialog, StudioDrawer, StudioEmptyState, StudioField, StudioMetricCard, StudioPageHeader, StudioTable, StudioTableSkeleton, StudioToastViewport } from '../../pages/host-console/components/studio-ui';
+import { useStudioToast } from '../../pages/host-console/components/studio-toast';
+import { useTeamAccountsPage } from './model/useTeamAccountsPage';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MANAGED_TEAM_ROLES: RoleCode[] = [ROLE_CODE.ANCHOR, ROLE_CODE.OPERATOR];
@@ -19,12 +21,8 @@ export function TeamAccountsPage() {
   const canUpdateTeamRole = hasPermission(currentUser, PERMISSION_CODE.TEAM_USER_UPDATE_ROLE);
   const canUpdateTeamStatus = hasPermission(currentUser, PERMISSION_CODE.TEAM_USER_UPDATE_STATUS);
   const canResetTeamPassword = hasPermission(currentUser, PERMISSION_CODE.TEAM_USER_RESET_PASSWORD);
-  const [query, setQuery] = useState<AdminUsersQuery>({ page: 1, pageSize: DEFAULT_PAGE_SIZE });
   const [keywordDraft, setKeywordDraft] = useState('');
-  const [users, setUsers] = useState<User[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [actionError, setError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [createForm, setCreateForm] = useState(EMPTY_CREATE_FORM);
   const [creating, setCreating] = useState(false);
@@ -37,36 +35,20 @@ export function TeamAccountsPage() {
   const [resetPassword, setResetPassword] = useState('');
   const [resettingPassword, setResettingPassword] = useState(false);
   const { toasts, showToast } = useStudioToast();
-
-  const totalPages = Math.max(1, Math.ceil(total / (query.pageSize || DEFAULT_PAGE_SIZE)));
-  const currentPage = query.page || 1;
-  const canSubmitCreate = canCreateTeam && createForm.username.trim().length > 0 && createForm.nickname.trim().length > 0 && createForm.password.length >= 8 && MANAGED_TEAM_ROLES.includes(createForm.roleCode);
-  const canSubmitResetPassword = canResetTeamPassword && resetPassword.length >= 8 && resetPassword.length <= 128;
-
+  const { query, users, total, loading, error: queryError, totalPages, currentPage, syncUsers: syncUsersQuery, runQuery } = useTeamAccountsPage(canListTeam, DEFAULT_PAGE_SIZE);
+  const error = actionError || queryError;
   const syncUsers = async (nextQuery = query) => {
-    if (!canListTeam) return;
-    setLoading(true);
     setError('');
     try {
-      const page = await listAdminUsers(nextQuery);
-      const outOfScopeUser = page.users.find((user) => !isManagedTeamUser(user));
-      if (outOfScopeUser) throw new Error(`团队账号接口返回了非子账号 ${outOfScopeUser.username}，违反主账号空间边界`);
-      setUsers(page.users);
-      setTotal(page.total);
-      setQuery((current) => ({ ...current, page: page.page, pageSize: page.pageSize }));
+      await syncUsersQuery(nextQuery);
     } catch (e) {
       const message = resultMessage(e);
       setError(message);
       showToast({ id: 'team-users-sync-failed', tone: 'danger', title: '账号列表同步失败', description: message });
-    } finally {
-      setLoading(false);
     }
   };
-
-  const runQuery = (nextQuery: AdminUsersQuery) => {
-    setQuery(nextQuery);
-    void syncUsers(nextQuery);
-  };
+  const canSubmitCreate = canCreateTeam && createForm.username.trim().length > 0 && createForm.nickname.trim().length > 0 && createForm.password.length >= 8 && MANAGED_TEAM_ROLES.includes(createForm.roleCode);
+  const canSubmitResetPassword = canResetTeamPassword && resetPassword.length >= 8 && resetPassword.length <= 128;
 
   const submitSearch = () => {
     runQuery({ ...query, keyword: keywordDraft.trim(), page: 1 });
@@ -156,10 +138,6 @@ export function TeamAccountsPage() {
       setResettingPassword(false);
     }
   };
-
-  useEffect(() => {
-    void syncUsers();
-  }, [canListTeam]);
 
   const metrics = useMemo(() => ({
     subaccounts: users.filter(isManagedTeamUser).length,
@@ -310,10 +288,6 @@ function NoTeamPermissionNotice({ currentUser }: { currentUser?: User | null }) 
       <StudioEmptyState compact icon={<ShieldAlert size={28} />} title="仅主账号可管理团队成员" description="当前账号只能查看后台业务功能，不能看到或提交创建团队子账号、修改角色、停用账号表单。" />
     </StudioCard>
   </>;
-}
-
-function isManagedTeamUser(user: User) {
-  return user.roleCodes.some((roleCode) => isManagedTeamRole(roleCode));
 }
 
 function teamRoleCode(user: User): RoleCode {

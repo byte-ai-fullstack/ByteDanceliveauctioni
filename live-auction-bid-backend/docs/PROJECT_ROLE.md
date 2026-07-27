@@ -19,7 +19,7 @@
 - WebSocket 房间同步：价格、倒计时、排名、领先/被超越/延时/结束提醒。
 - MySQL/GORM 持久化核心业务数据，Redis 承担高频读写、幂等、事件流辅助能力。
 - 用户账号、JWT、角色权限、主播/场控/买家等基础权限边界。
-- Consul 注册发现、健康检查、Docker Compose 本地一键演示。
+- Docker DNS/Kubernetes Service DNS 服务发现、健康检查、Docker Compose 本地一键演示。
 - 统一 API / WebSocket 契约，供 PC 前端和 H5 端复用。
 
 ## 本项目不负责什么

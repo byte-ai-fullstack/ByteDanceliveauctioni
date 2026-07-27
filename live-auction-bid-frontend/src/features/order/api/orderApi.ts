@@ -2,9 +2,8 @@ import { apiRequest } from '../../../shared/api/httpClient';
 import { normalizeLot } from '../../../shared/api/normalizers';
 import { toQueryString } from '../../../shared/api/query';
 import { assertOkResult } from '../../../shared/api/result';
-import { listLots } from '../../auction/api/auctionApi';
-import type { Lot, ReplyResult } from '../../../shared/api/types';
-import type { DeliveryAddressSnapshot, LotResultReply, OrderPage, OrderRecord, OrderStatus, OrderSummary, PaymentStatus } from '../model/orderTypes';
+import type { AdminOrdersReply } from '../../../shared/api/types';
+import type { DeliveryAddressSnapshot, LotResultReply, OrderPage, OrderStatus, OrderSummary, PaymentStatus } from '../model/orderTypes';
 
 export type AdminOrdersQuery = {
   page?: number;
@@ -13,14 +12,6 @@ export type AdminOrdersQuery = {
   paymentStatus?: PaymentStatus | '';
   lotId?: string;
   buyer?: string;
-};
-
-type ListOrdersReply = {
-  result?: ReplyResult;
-  orders?: unknown[];
-  total?: number | string;
-  page?: number | string;
-  pageSize?: number | string;
 };
 
 function requiredValue<T>(value: T | undefined | null, field: string): T {
@@ -33,8 +24,8 @@ function requireOrders(value: unknown[] | undefined): unknown[] {
   return value;
 }
 
-function readField(raw: Record<string, unknown>, camel: string, snake = camel) {
-  return raw[camel] ?? raw[snake];
+function readField(raw: Record<string, unknown>, name: string) {
+  return raw[name];
 }
 
 function asRecord(input: unknown, field: string): Record<string, unknown> {
@@ -50,8 +41,8 @@ function normalizeDeliveryAddressSnapshot(input: unknown): DeliveryAddressSnapsh
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const raw = input as Record<string, unknown>;
   return {
-    addressId: stringValue(readField(raw, 'addressId', 'address_id')),
-    receiverName: stringValue(readField(raw, 'receiverName', 'receiver_name')),
+    addressId: stringValue(readField(raw, 'addressId')),
+    receiverName: stringValue(readField(raw, 'receiverName')),
     receiver: stringValue(readField(raw, 'receiver')),
     phone: stringValue(readField(raw, 'phone')),
     province: stringValue(readField(raw, 'province')),
@@ -59,7 +50,7 @@ function normalizeDeliveryAddressSnapshot(input: unknown): DeliveryAddressSnapsh
     district: stringValue(readField(raw, 'district')),
     street: stringValue(readField(raw, 'street')),
     detail: stringValue(readField(raw, 'detail')),
-    fullAddress: stringValue(readField(raw, 'fullAddress', 'full_address')),
+    fullAddress: stringValue(readField(raw, 'fullAddress')),
   };
 }
 
@@ -67,24 +58,24 @@ function normalizeOrderSummary(input: unknown): OrderSummary {
   const raw = asRecord(input, 'order');
   return {
     id: stringValue(requiredValue(readField(raw, 'id'), 'order.id')),
-    lotId: stringValue(requiredValue(readField(raw, 'lotId', 'lot_id'), 'order.lotId')),
-    roomId: stringValue(requiredValue(readField(raw, 'roomId', 'room_id'), 'order.roomId')),
-    lotTitle: stringValue(readField(raw, 'lotTitle', 'lot_title')),
-    lotImageUrl: stringValue(readField(raw, 'lotImageUrl', 'lot_image_url')),
-    buyerUserId: stringValue(readField(raw, 'buyerUserId', 'buyer_user_id')),
-    buyerNickname: stringValue(readField(raw, 'buyerNickname', 'buyer_nickname')),
+    lotId: stringValue(requiredValue(readField(raw, 'lotId'), 'order.lotId')),
+    roomId: stringValue(requiredValue(readField(raw, 'roomId'), 'order.roomId')),
+    lotTitle: stringValue(readField(raw, 'lotTitle')),
+    lotImageUrl: stringValue(readField(raw, 'lotImageUrl')),
+    buyerUserId: stringValue(readField(raw, 'buyerUserId')),
+    buyerNickname: stringValue(readField(raw, 'buyerNickname')),
     status: stringValue(requiredValue(readField(raw, 'status'), 'order.status')) as OrderStatus,
-    paymentStatus: stringValue(requiredValue(readField(raw, 'paymentStatus', 'payment_status'), 'order.paymentStatus')) as PaymentStatus,
-    paymentId: stringValue(readField(raw, 'paymentId', 'payment_id')) || undefined,
-    shippingAddressId: stringValue(readField(raw, 'shippingAddressId', 'shipping_address_id')) || undefined,
-    shippingAddressSnapshot: normalizeDeliveryAddressSnapshot(readField(raw, 'shippingAddressSnapshot', 'shipping_address_snapshot')),
-    addressSnapshot: stringValue(readField(raw, 'addressSnapshot', 'address_snapshot')) || undefined,
+    paymentStatus: stringValue(requiredValue(readField(raw, 'paymentStatus'), 'order.paymentStatus')) as PaymentStatus,
+    paymentId: stringValue(readField(raw, 'paymentId')) || undefined,
+    shippingAddressId: stringValue(readField(raw, 'shippingAddressId')) || undefined,
+    shippingAddressSnapshot: normalizeDeliveryAddressSnapshot(readField(raw, 'shippingAddressSnapshot')),
+    addressSnapshot: stringValue(readField(raw, 'addressSnapshot')) || undefined,
     amount: requiredValue(readField(raw, 'amount'), 'order.amount') as number | string,
     currency: stringValue(readField(raw, 'currency') ?? 'CNY') || 'CNY',
-    createdAtUnixMs: requiredValue(readField(raw, 'createdAtUnixMs', 'created_at_unix_ms'), 'order.createdAtUnixMs') as number | string,
-    updatedAtUnixMs: requiredValue(readField(raw, 'updatedAtUnixMs', 'updated_at_unix_ms'), 'order.updatedAtUnixMs') as number | string,
-    expiresAtUnixMs: requiredValue(readField(raw, 'expiresAtUnixMs', 'expires_at_unix_ms'), 'order.expiresAtUnixMs') as number | string,
-    paidAtUnixMs: readField(raw, 'paidAtUnixMs', 'paid_at_unix_ms') as number | string | undefined,
+    createdAtUnixMs: requiredValue(readField(raw, 'createdAtUnixMs'), 'order.createdAtUnixMs') as number | string,
+    updatedAtUnixMs: requiredValue(readField(raw, 'updatedAtUnixMs'), 'order.updatedAtUnixMs') as number | string,
+    expiresAtUnixMs: requiredValue(readField(raw, 'expiresAtUnixMs'), 'order.expiresAtUnixMs') as number | string,
+    paidAtUnixMs: readField(raw, 'paidAtUnixMs') as number | string | undefined,
     version: readField(raw, 'version') as number | string | undefined,
   };
 }
@@ -96,29 +87,24 @@ function normalizeLotResultReply(input: unknown): LotResultReply {
   return {
     ...(raw as LotResultReply),
     lot: lot === undefined || lot === null ? undefined : normalizeLot(lot),
-    auctionState: stringValue(readField(raw, 'auctionState', 'auction_state')) as LotResultReply['auctionState'],
+    auctionState: stringValue(readField(raw, 'auctionState')) as LotResultReply['auctionState'],
     order: order === undefined || order === null ? undefined : normalizeOrderSummary(order),
   };
 }
 
-function isSettlementCandidate(lot: Lot) {
-  return lot.status === 'LOT_STATUS_SETTLED'
-    || Number(lot.settledAtUnixMs || 0) > 0
-    || Boolean(lot.winnerUserId);
-}
-
-export async function getLotResult(lotId: string) {
+export async function getLotResult(lotId: string, signal?: AbortSignal) {
   return normalizeLotResultReply(assertOkResult(await apiRequest<LotResultReply>({
     path: `/api/lots/${encodeURIComponent(lotId)}/result`,
     method: 'GET',
     operation: 'lot-result',
+    signal,
   })));
 }
 
-export async function listAdminOrders(query: AdminOrdersQuery = {}): Promise<OrderPage> {
+export async function listAdminOrders(query: AdminOrdersQuery = {}, signal?: AbortSignal): Promise<OrderPage> {
   const page = query.page ?? 1;
   const pageSize = query.pageSize ?? 20;
-  const reply = assertOkResult(await apiRequest<ListOrdersReply>({
+  const reply = assertOkResult(await apiRequest<AdminOrdersReply>({
     path: `/api/admin/orders${toQueryString({
       page,
       pageSize,
@@ -129,6 +115,7 @@ export async function listAdminOrders(query: AdminOrdersQuery = {}): Promise<Ord
     })}`,
     method: 'GET',
     operation: 'admin-list-orders',
+    signal,
   }));
   return {
     orders: requireOrders(reply.orders).map(normalizeOrderSummary),
@@ -136,18 +123,4 @@ export async function listAdminOrders(query: AdminOrdersQuery = {}): Promise<Ord
     page: Number(requiredValue(reply.page, 'page')),
     pageSize: Number(requiredValue(reply.pageSize, 'pageSize')),
   };
-}
-
-export async function listSettlementOrders(roomId: string): Promise<OrderRecord[]> {
-  const lots = await listLots(roomId);
-  const settledLots = lots.filter(isSettlementCandidate);
-  const results = await Promise.all(settledLots.map(async (lot) => {
-    const result = await getLotResult(lot.id);
-    return {
-      lot: result.lot ?? lot,
-      auctionState: result.auctionState ?? (lot.status === 'LOT_STATUS_CANCELLED' ? 'CANCELLED' : 'SETTLED'),
-      order: result.order ?? null,
-    } satisfies OrderRecord;
-  }));
-  return results;
 }

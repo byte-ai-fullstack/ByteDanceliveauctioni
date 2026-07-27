@@ -8,6 +8,7 @@ import (
 	v1 "live-auction-bid/backend/api/auction/service/v1"
 	"live-auction-bid/backend/app/auction/service/internal/biz/shop"
 	userbiz "live-auction-bid/backend/app/auction/service/internal/biz/user"
+	"live-auction-bid/backend/app/auction/service/internal/orderenrichment"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/apperr"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/clock"
 )
@@ -136,6 +137,7 @@ type RoomState struct {
 	RoomID            string `json:"roomId"`
 	MainAccountID     string `json:"mainAccountId"`
 	ActiveLotID       string `json:"activeLotId,omitempty"`
+	DisplayLotID      string `json:"displayLotId,omitempty"`
 	ActiveLotVersion  int64  `json:"activeLotVersion,omitempty"`
 	NextQueuePosition int32  `json:"nextQueuePosition"`
 	UpdatedAtUnixMs   int64  `json:"updatedAtUnixMs"`
@@ -178,6 +180,9 @@ type Order struct {
 	Status                  OrderStatus                   `json:"status"`
 	PaymentStatus           PaymentStatus                 `json:"paymentStatus"`
 	PaymentID               string                        `json:"paymentId,omitempty"`
+	ShopName                string                        `json:"shopName,omitempty"`
+	EnrichmentStatus        orderenrichment.Status        `json:"enrichmentStatus"`
+	EnrichmentUpdatedAtMs   int64                         `json:"enrichmentUpdatedAtUnixMs,omitempty"`
 	ShippingAddressID       string                        `json:"shippingAddressId,omitempty"`
 	ShippingAddressSnapshot *shop.DeliveryAddressSnapshot `json:"shippingAddressSnapshot,omitempty"`
 	Amount                  int64                         `json:"amount"`
@@ -237,6 +242,9 @@ type OrderSummary struct {
 	Status                  OrderStatus                   `json:"status"`
 	PaymentStatus           PaymentStatus                 `json:"paymentStatus"`
 	PaymentID               string                        `json:"paymentId,omitempty"`
+	ShopName                string                        `json:"shopName,omitempty"`
+	EnrichmentStatus        orderenrichment.Status        `json:"enrichmentStatus"`
+	EnrichmentUpdatedAtMs   int64                         `json:"enrichmentUpdatedAtUnixMs,omitempty"`
 	ShippingAddressID       string                        `json:"shippingAddressId,omitempty"`
 	ShippingAddressSnapshot *shop.DeliveryAddressSnapshot `json:"shippingAddressSnapshot,omitempty"`
 	Amount                  int64                         `json:"amount"`
@@ -502,6 +510,9 @@ func (o Order) Summary() OrderSummary {
 		Status:                  status,
 		PaymentStatus:           paymentStatus,
 		PaymentID:               o.PaymentID,
+		ShopName:                o.ShopName,
+		EnrichmentStatus:        o.EnrichmentStatus,
+		EnrichmentUpdatedAtMs:   o.EnrichmentUpdatedAtMs,
 		ShippingAddressID:       o.ShippingAddressID,
 		ShippingAddressSnapshot: o.ShippingAddressSnapshot,
 		Amount:                  o.Amount,

@@ -4,6 +4,7 @@ import { resultMessage } from '../api/result';
 import { hasPermission, type PermissionCode } from '../api/types';
 import { authSession } from './authSession';
 import type { AuthState } from './authStorage';
+import { navigateApp } from '../router/historyStore';
 
 type AuthSessionValue = {
   session: AuthState;
@@ -29,7 +30,7 @@ function loginURL(expired = false) {
 
 function redirectToLogin(expired = false) {
   if (location.pathname.startsWith('/login')) return;
-  location.href = loginURL(expired);
+  navigateApp(loginURL(expired), true);
 }
 
 export function AuthSessionProvider({ children }: { children: ReactNode }) {
@@ -76,7 +77,7 @@ export function AuthSessionProvider({ children }: { children: ReactNode }) {
   return <AuthSessionContext.Provider value={value}>{children}</AuthSessionContext.Provider>;
 }
 
-export function useAuthSession() {
+function useAuthSession() {
   const value = useContext(AuthSessionContext);
   if (!value) throw new Error('useAuthSession must be used inside AuthSessionProvider');
   return value;
@@ -128,7 +129,7 @@ export function ProtectedRoute({ children, requiredPermissions }: { children: Re
     return () => {
       cancelled = true;
     };
-  }, [session.tokens?.accessToken, session.tokens?.refreshToken, userPermissionsKey, requiredPermissionsKey]);
+  }, [session.tokens?.accessToken, session.tokens?.refreshToken, userPermissionsKey, requiredPermissionsKey, requiredPermissions]);
 
   if (checking) return <main className="routeLoading" aria-busy="true"><span>LiveAuction Studio</span><b>正在验证登录态...</b></main>;
   if (denied) return <main className="routeLoading"><span>LiveAuction Studio</span><b>当前账号无权访问管理后台</b></main>;

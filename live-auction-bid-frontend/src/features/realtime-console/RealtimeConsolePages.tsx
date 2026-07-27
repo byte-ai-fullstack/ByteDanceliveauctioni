@@ -1,32 +1,35 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { AlertTriangle, Clock3, ListChecks, Package, Radio, RefreshCw, ShieldAlert, Trophy, Wifi } from 'lucide-react';
-import { cancelLot, getRoomSnapshot, listAdminLots, revealTrustCard, settleLot, startDuel } from '../auction/api/auctionApi';
+import { AppLink } from '../../shared/router/AppLink';
+import { cancelLot, revealTrustCard, settleLot, startDuel } from '../auction/api/auctionApi';
 import { canSettleLot, isLiveLot, isQueueReadyLot, lotStatusLabel, lotStatusTone } from '../../entities/auction/model/auctionStatus';
 import type { Bid, Lot, RoomSnapshot } from '../../shared/api/types';
 import { resultMessage } from '../../shared/api/result';
 import { formatDateTimeText, formatMoneyText } from '../../shared/lib/format';
 import { formatAuctionLeftMs, getLotLeftMs, getServerOffsetMs } from '../../shared/lib/time';
-import { HTTP_REFRESH_EVENTS, REALTIME_CONSOLE_EVENTS, REALTIME_EVENT } from '../../shared/realtime/events';
 import { roomSocketStatusLabel, useRoomSocket } from '../../shared/realtime/useRoomSocket';
 import { StudioBadge, StudioButton, StudioCard, StudioEmptyState, StudioMetricCard, StudioPageHeader, StudioTable, StudioTableSkeleton } from '../../pages/host-console/components/studio-ui';
+import { useLiveControlQuery, useRoomSnapshotQuery } from './model/useRealtimeQueries';
 
-type LinkEvent = { seq: number; time: string; type: string; lotId?: string; detail: string };
+type LinkEvent = { lotVersion: number; time: string; type: string; lotId?: string; detail: string };
 
 export function LiveControlPage({ roomId }: { roomId: string }) {
-  const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
-  const [lots, setLots] = useState<Lot[]>([]);
-  const [lot, setLot] = useState<Lot | null>(null);
-  const [error, setError] = useState('');
+  const [realtimeSnapshot, setRealtimeSnapshot] = useState<RoomSnapshot | null>(null);
+  const [realtimeLot, setRealtimeLot] = useState<Lot | null>(null);
+  const [socketError, setError] = useState('');
   const [working, setWorking] = useState('');
+  const { snapshot: httpSnapshot, lots, error: queryError, sync: syncQuery } = useLiveControlQuery(roomId);
+  const snapshot = realtimeSnapshot ?? httpSnapshot;
+  const lot = realtimeLot ?? snapshot?.currentLot ?? lots.find(isLiveLot) ?? null;
+  const error = socketError || queryError;
 
   const syncRoom = async (): Promise<RoomSnapshot | void> => {
     setError('');
+    setRealtimeSnapshot(null);
+    setRealtimeLot(null);
     try {
-      const [nextSnapshot, page] = await Promise.all([getRoomSnapshot(roomId), listAdminLots({ page: 1, pageSize: 20, roomId, view: 'current' })]);
-      setSnapshot(nextSnapshot);
-      setLots(page.lots);
-      setLot(nextSnapshot.currentLot || page.lots.find(isLiveLot) || null);
-      return nextSnapshot;
+      const data = await syncQuery();
+      return data.snapshot;
     } catch (e) {
       const message = resultMessage(e);
       setError(message);
@@ -35,7 +38,6 @@ export function LiveControlPage({ roomId }: { roomId: string }) {
 
   const socket = useRoomSocket({
     roomId,
-    handledEventTypes: REALTIME_CONSOLE_EVENTS,
     recoverSnapshot: syncRoom,
     onStatusChange: (status) => {
       if (status === 'connected') {
@@ -44,23 +46,20 @@ export function LiveControlPage({ roomId }: { roomId: string }) {
     },
     onEvent: (event) => {
       if (event.snapshot) {
-        setSnapshot(event.snapshot);
-        setLot(event.snapshot.currentLot || null);
+        setRealtimeSnapshot(event.snapshot);
+        setRealtimeLot(event.snapshot.currentLot || null);
       }
-      if (event.lot) setLot(event.lot as Lot);
-      if (HTTP_REFRESH_EVENTS.has(event.type)) void syncRoom();
+      if (event.lot) setRealtimeLot(event.lot as Lot);
     },
     onSnapshot: (nextSnapshot) => {
-      setSnapshot(nextSnapshot);
-      setLot(nextSnapshot.currentLot || null);
+      setRealtimeSnapshot(nextSnapshot);
+      setRealtimeLot(nextSnapshot.currentLot || null);
     },
     onError: (e, phase) => {
       if (phase === 'socket') return;
       setError(resultMessage(e));
     },
   });
-
-  useEffect(() => { void syncRoom(); }, [roomId]);
 
   const nextLot = lots.find((item) => isQueueReadyLot(item) && item.id !== lot?.id) || null;
   const wsState = roomSocketStatusLabel(socket.status);
@@ -81,7 +80,7 @@ export function LiveControlPage({ roomId }: { roomId: string }) {
 
   return <section className={`liveControlPage ${lot ? 'isLive' : 'isPrepared'}`}>
     <StudioCard padding="lg" className="controlTopBar">
-      <StudioPageHeader eyebrow="Realtime control" title="直播间中控台" actions={<><a className="studioButton studioButton-secondary studioButton-md controlUtilityButton" href="/admin/auctions">返回队列</a><StudioButton type="button" variant="secondary" className="controlUtilityButton" icon={<RefreshCw size={15} />} loading={working === '同步'} onClick={() => void action('同步', syncRoom)}>立即同步</StudioButton></>} />
+      <StudioPageHeader eyebrow="Realtime control" title="直播间中控台" actions={<><AppLink className="studioButton studioButton-secondary studioButton-md controlUtilityButton" to="/admin/auctions">返回队列</AppLink><StudioButton type="button" variant="secondary" className="controlUtilityButton" icon={<RefreshCw size={15} />} loading={working === '同步'} onClick={() => void action('同步', syncRoom)}>立即同步</StudioButton></>} />
     </StudioCard>
     {error ? <div className="auctionMgmtNotice danger"><AlertTriangle size={16} />{error}</div> : null}
     <section className="auctionMgmtStats liveControlStatusGrid">
@@ -100,33 +99,26 @@ export function LiveControlPage({ roomId }: { roomId: string }) {
 }
 
 export function BidAuditPage({ roomId }: { roomId: string }) {
-  const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [realtimeSnapshot, setRealtimeSnapshot] = useState<RoomSnapshot | null>(null);
+  const [socketError, setError] = useState('');
+  const { snapshot: httpSnapshot, loading, error: queryError, sync: syncQuery } = useRoomSnapshotQuery(roomId);
+  const snapshot = realtimeSnapshot ?? httpSnapshot;
+  const error = socketError || queryError;
 
   const sync = async (): Promise<RoomSnapshot | void> => {
-    setLoading(true);
     setError('');
+    setRealtimeSnapshot(null);
     try {
-      const next = await getRoomSnapshot(roomId);
-      setSnapshot(next);
-      return next;
+      return await syncQuery();
     } catch (e) {
       setError(resultMessage(e));
-    } finally {
-      setLoading(false);
     }
   };
 
   useRoomSocket({
     roomId,
-    handledEventTypes: REALTIME_CONSOLE_EVENTS,
     recoverSnapshot: sync,
-    onEvent: (event) => {
-      if (event.snapshot) setSnapshot(event.snapshot);
-      if (event.type === REALTIME_EVENT.BID_ACCEPTED || event.type === REALTIME_EVENT.BID_OUTBID || event.type === REALTIME_EVENT.RANKING_UPDATED) void sync();
-    },
-    onSnapshot: setSnapshot,
+    onSnapshot: setRealtimeSnapshot,
     onStatusChange: (status) => {
       if (status === 'connected') {
         setError((current) => current.includes('实时连接') ? '' : current);
@@ -137,8 +129,6 @@ export function BidAuditPage({ roomId }: { roomId: string }) {
       setError(resultMessage(e));
     },
   });
-
-  useEffect(() => { void sync(); }, [roomId]);
 
   const bids = snapshot?.recentBids || [];
   const leadingUserId = snapshot?.currentLot?.leadingUserId || snapshot?.ranking?.[0]?.userId || '';
@@ -151,20 +141,24 @@ export function BidAuditPage({ roomId }: { roomId: string }) {
 }
 
 export function RealtimeDiagnosticsPage({ roomId }: { roomId: string }) {
-  const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
+  const [realtimeSnapshot, setRealtimeSnapshot] = useState<RoomSnapshot | null>(null);
   const [events, setEvents] = useState<LinkEvent[]>([]);
-  const [lastEventType, setLastEventType] = useState('暂无');
-  const [lastHeartbeat, setLastHeartbeat] = useState('未收到');
-  const [error, setError] = useState('');
+  const [lastEventType, setLastEventType] = useState('');
+  const [lastHeartbeat, setLastHeartbeat] = useState('');
+  const [socketError, setError] = useState('');
+  const { snapshot: httpSnapshot, error: queryError, dataUpdatedAt, sync: syncQuery } = useRoomSnapshotQuery(roomId);
+  const snapshot = realtimeSnapshot ?? httpSnapshot;
+  const error = socketError || queryError;
+  const heartbeatText = lastHeartbeat || (snapshot && dataUpdatedAt ? timeText(dataUpdatedAt) : '未收到');
+  const eventTypeText = lastEventType || (snapshot ? 'ROOM_SNAPSHOT' : '暂无');
 
   const sync = async (): Promise<RoomSnapshot | void> => {
     setError('');
+    setRealtimeSnapshot(null);
+    setLastHeartbeat('');
+    setLastEventType('');
     try {
-      const next = await getRoomSnapshot(roomId);
-      setSnapshot(next);
-      setLastHeartbeat(nowText());
-      setLastEventType('ROOM_SNAPSHOT');
-      return next;
+      return await syncQuery();
     } catch (e) {
       setError(resultMessage(e));
     }
@@ -172,16 +166,14 @@ export function RealtimeDiagnosticsPage({ roomId }: { roomId: string }) {
 
   const socket = useRoomSocket({
     roomId,
-    handledEventTypes: REALTIME_CONSOLE_EVENTS,
     recoverSnapshot: sync,
     onEvent: (event, meta) => {
       setLastHeartbeat(meta.receivedAtText);
       setLastEventType(event.type);
-      setEvents((current) => [{ seq: meta.seq, time: meta.receivedAtText, type: event.type, lotId: event.lotId, detail: event.reason || event.lot?.title || event.bid?.nickname || '房间事件' }, ...current].slice(0, 80));
-      if (event.snapshot) setSnapshot(event.snapshot);
-      if (HTTP_REFRESH_EVENTS.has(event.type)) void sync();
+      setEvents((current) => [{ lotVersion: meta.lotVersion, time: meta.receivedAtText, type: event.type, lotId: event.lotId, detail: event.reason || event.lot?.title || event.bid?.nickname || '房间事件' }, ...current].slice(0, 80));
+      if (event.snapshot) setRealtimeSnapshot(event.snapshot);
     },
-    onSnapshot: setSnapshot,
+    onSnapshot: setRealtimeSnapshot,
     onStatusChange: (status) => {
       if (status === 'connected') {
         setError((current) => current.includes('实时连接') ? '' : current);
@@ -193,23 +185,21 @@ export function RealtimeDiagnosticsPage({ roomId }: { roomId: string }) {
     },
   });
 
-  useEffect(() => { void sync(); }, [roomId]);
-
   const wsState = roomSocketStatusLabel(socket.status);
   return <section className="realtimeDiagPage">
     <StudioCard padding="lg" className="realtimeDiagHero"><StudioPageHeader eyebrow="Realtime diagnostics" title="实时链路诊断" description="诊断当前主播空间唯一直播间的 WebSocket、快照恢复、服务端时间偏移与事件流。" actions={<StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} onClick={() => void sync()}>重新同步房间快照</StudioButton>} /></StudioCard>
     {error ? <div className="auctionMgmtNotice danger"><AlertTriangle size={16} />{error}</div> : null}
-    <section className="realtimeSyncCapsule"><div><Wifi size={18} /><span>实时同步状态</span><StudioBadge tone={socket.status === 'connected' ? 'success' : 'warning'}>{wsState}</StudioBadge></div><div className="syncCapsuleMetrics"><span>最近心跳：<b>{lastHeartbeat}</b></span><span>重连次数：<b>{socket.reconnectCount}</b></span><span>服务器偏移：<b>{snapshot?.serverTimeUnixMs ? `${getServerOffsetMs(snapshot.serverTimeUnixMs)}ms` : '待同步'}</b></span><span>最近事件：<b>{lastEventType}</b></span></div></section>
-    <section className="realtimeDiagGrid"><StudioCard title="客户端可计算指标" subtitle="Local diagnostics"><div className="systemHealthGrid"><span>快照版本：<b>{snapshot?.currentLot?.version || '待同步'}</b></span><span>排行榜人数：<b>{snapshot?.ranking?.length || 0}</b></span><span>当前竞拍：<b>{snapshot?.currentLot?.id || '无 LIVE'}</b></span><span>事件数：<b>{events.length}</b></span></div></StudioCard><StudioCard title="最近事件流" subtitle="Events"><div className="linkEventList inline">{events.length ? events.map((event) => <div key={`${event.seq}-${event.time}`}><b>#{event.seq}</b><span>{event.type}</span><small>{event.time} · {event.lotId || roomId}</small><p>{event.detail}</p></div>) : <p>暂无事件。等待 WebSocket 事件或手动同步房间快照。</p>}</div></StudioCard></section>
+    <section className="realtimeSyncCapsule"><div><Wifi size={18} /><span>实时同步状态</span><StudioBadge tone={socket.status === 'connected' ? 'success' : 'warning'}>{wsState}</StudioBadge></div><div className="syncCapsuleMetrics"><span>最近心跳：<b>{heartbeatText}</b></span><span>重连次数：<b>{socket.reconnectCount}</b></span><span>服务器偏移：<b>{snapshot?.serverTimeUnixMs ? `${getServerOffsetMs(snapshot.serverTimeUnixMs)}ms` : '待同步'}</b></span><span>最近事件：<b>{eventTypeText}</b></span></div></section>
+    <section className="realtimeDiagGrid"><StudioCard title="客户端可计算指标" subtitle="Local diagnostics"><div className="systemHealthGrid"><span>快照版本：<b>{snapshot?.currentLot?.version || '待同步'}</b></span><span>排行榜人数：<b>{snapshot?.ranking?.length || 0}</b></span><span>当前竞拍：<b>{snapshot?.currentLot?.id || '无 LIVE'}</b></span><span>事件数：<b>{events.length}</b></span></div></StudioCard><StudioCard title="最近事件流" subtitle="Events"><div className="linkEventList inline">{events.length ? events.map((event) => <div key={`${event.lotVersion}-${event.time}`}><b>v{event.lotVersion}</b><span>{event.type}</span><small>{event.time} · {event.lotId || roomId}</small><p>{event.detail}</p></div>) : <p>暂无事件。等待 WebSocket 事件或手动同步房间快照。</p>}</div></StudioCard></section>
   </section>;
 }
 
-function nowText() {
-  return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+function timeText(value: number) {
+  return new Date(value).toLocaleTimeString('zh-CN', { hour12: false });
 }
 
 function PreparedStage({ nextLot, onSync }: { nextLot: Lot | null; onSync: () => void }) {
-  return <section className="preparedControlStage"><StudioCard title="当前无 LIVE" subtitle="Ready"><StudioEmptyState icon={<Radio size={30} />} title="等待开拍" description={nextLot ? `下一件拍品：${nextLot.title}` : '队列中没有待开拍拍品。'} action={<><a className="studioButton studioButton-primary studioButton-md" href="/admin/auctions">查看本场队列</a><StudioButton type="button" variant="secondary" onClick={onSync}>同步房间状态</StudioButton></>} /></StudioCard></section>;
+  return <section className="preparedControlStage"><StudioCard title="当前无 LIVE" subtitle="Ready"><StudioEmptyState icon={<Radio size={30} />} title="等待开拍" description={nextLot ? `下一件拍品：${nextLot.title}` : '队列中没有待开拍拍品。'} action={<><AppLink className="studioButton studioButton-primary studioButton-md" to="/admin/auctions">查看本场队列</AppLink><StudioButton type="button" variant="secondary" onClick={onSync}>同步房间状态</StudioButton></>} /></StudioCard></section>;
 }
 
 function RoomLivePreview({ lot, snapshot, wsState }: { lot: Lot; snapshot: RoomSnapshot | null; wsState: string }) {
@@ -245,5 +235,5 @@ function LiveRankingBoard({ ranking, leadingUserId }: { ranking: RoomSnapshot['r
 }
 
 function NextLotQueue({ lot }: { lot: Lot | null }) {
-  return <section className="controlBottomCard"><h3>下一场待开拍</h3>{lot ? <div className="nextQueueItem"><b>{lot.title}</b><span>起拍 {formatMoneyText(lot.rule.startPrice)} · 加价 {formatMoneyText(lot.rule.minIncrement)}</span><a className="studioButton studioButton-secondary studioButton-sm" href="/admin/auctions">回队列开拍</a></div> : <StudioEmptyState compact icon={<Package size={24} />} title="暂无下一场待开拍" description="可以回到本场队列调整顺序，或添加新拍品。" />}</section>;
+  return <section className="controlBottomCard"><h3>下一场待开拍</h3>{lot ? <div className="nextQueueItem"><b>{lot.title}</b><span>起拍 {formatMoneyText(lot.rule.startPrice)} · 加价 {formatMoneyText(lot.rule.minIncrement)}</span><AppLink className="studioButton studioButton-secondary studioButton-sm" to="/admin/auctions">回队列开拍</AppLink></div> : <StudioEmptyState compact icon={<Package size={24} />} title="暂无下一场待开拍" description="可以回到本场队列调整顺序，或添加新拍品。" />}</section>;
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AuctionSocketEvent } from '../../../shared/api/types';
+import type { AuctionSocketEvent, RoomSnapshot } from '../../../shared/api/types';
 import { createRoomSocket, type RoomSocketState } from '../../../shared/realtime/realtimeClient';
+import { getRoomPersonalState } from '../../auction/api/auctionApi';
 
 type SocketState = '连接中' | '已连接' | '重连中' | '已断开';
 
@@ -14,7 +15,8 @@ function toViewState(state: RoomSocketState): SocketState {
 export function useAuctionSocket(
   roomId: string,
   onEvent: (event: AuctionSocketEvent) => void,
-  onReconnect: () => Promise<void> | void,
+  onReconnect: () => Promise<RoomSnapshot | void> | RoomSnapshot | void,
+  authKey = '',
 ) {
   const [state, setState] = useState<SocketState>('连接中');
   const onEventRef = useRef(onEvent);
@@ -31,11 +33,12 @@ export function useAuctionSocket(
       onEvent: (event) => onEventRef.current(event),
       onStateChange: (next) => setState(toViewState(next)),
       onSnapshotRecovery: () => reconnectRef.current(),
+      onPersonalRecovery: authKey ? () => getRoomPersonalState(roomId) : undefined,
     });
 
     socket.connect();
     return () => socket.disconnect();
-  }, [roomId]);
+  }, [authKey, roomId]);
 
   return state;
 }

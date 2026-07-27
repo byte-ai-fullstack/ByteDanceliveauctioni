@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'mysql %s\n' "$*" >>"$MYSQL_FAKE_LOG"
+if [[ " $* " == *" information_schema.schemata "* ]]; then
+  printf '%s\n' 0
+elif [[ " $* " == *" information_schema.tables "* ]]; then
+  printf '%s\n' 29
+elif [[ "$*" == *"auction_schema_migrations"* ]]; then
+  printf '%s\n' 2
+elif [[ $# -gt 0 && "${!#}" == restore_* ]]; then
+  tee "$MYSQL_FAKE_RESTORE_SQL" >/dev/null
+fi

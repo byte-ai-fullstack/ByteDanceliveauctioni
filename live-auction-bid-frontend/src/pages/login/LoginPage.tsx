@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -21,6 +21,7 @@ import { currentAuth, login, logout, registerMerchant, resetPassword } from '../
 import { resultMessage } from '../../shared/api/result';
 import { canAccessBackoffice } from '../../shared/api/types';
 import { clearExpiredMessage, readExpiredMessage } from '../../shared/auth/authStorage';
+import { navigateApp } from '../../shared/router/historyStore';
 
 function nextPath(fallback = '/host') {
   const params = new URLSearchParams(location.search);
@@ -86,20 +87,12 @@ export function LoginPage({ embedded = false }: { embedded?: boolean; title?: st
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(initialLoginError);
   const [message, setMessage] = useState('');
 
   const currentUser = currentAuth().user;
   const current = canAccessBackoffice(currentUser) ? currentUser : null;
   const needsConfirmPassword = mode === 'register' || mode === 'reset';
-
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    if (!params.get('expired')) return;
-    const message = readExpiredMessage('登录已过期，请重新登录');
-    clearExpiredMessage();
-    setError(message);
-  }, []);
 
   const submit = async () => {
     if (busy) return;
@@ -121,7 +114,7 @@ export function LoginPage({ embedded = false }: { embedded?: boolean; title?: st
       } else {
         await login(username.trim(), password);
       }
-      location.href = redirectTo;
+      navigateApp(redirectTo, true);
     } catch (e) {
       setError(resultMessage(e));
     } finally {
@@ -255,4 +248,12 @@ export function LoginPage({ embedded = false }: { embedded?: boolean; title?: st
       </section>
     </main>
   );
+}
+
+function initialLoginError() {
+  const params = new URLSearchParams(location.search);
+  if (!params.get('expired')) return '';
+  const message = readExpiredMessage('登录已过期，请重新登录');
+  clearExpiredMessage();
+  return message;
 }

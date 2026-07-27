@@ -20,6 +20,7 @@ import type {
   RoomSnapshot,
 } from '../../../shared/api/types';
 import { authSession } from '../../../shared/auth/authSession';
+import { normalizeRoomPersonalRecovery, type RoomPersonalRecovery } from '../../../shared/realtime/personalRecovery';
 
 type SnapshotReply = { snapshot?: unknown };
 type LotResultReply = LotResult | { lot?: unknown; order?: unknown; orderId?: string; order_id?: string };
@@ -56,6 +57,16 @@ export async function getRoomSnapshot(roomId: string): Promise<RoomSnapshot> {
   });
 
   return normalizeRoomSnapshot(reply.snapshot ?? reply, roomId);
+}
+
+export async function getRoomPersonalState(roomId: string): Promise<RoomPersonalRecovery> {
+  const reply = await apiRequest<unknown>({
+    path: `/api/rooms/${encodeURIComponent(roomId)}/me`,
+    auth: 'required',
+    operation: 'getRoomPersonalState',
+  });
+
+  return normalizeRoomPersonalRecovery(reply);
 }
 
 export async function listPublicRooms(): Promise<Room[]> {

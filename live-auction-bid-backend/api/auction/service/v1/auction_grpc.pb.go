@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.4.0
 // - protoc             v4.25.8
-// source: api/auction/service/v1/auction.proto
+// source: auction/service/v1/auction.proto
 
 package v1
 
@@ -43,6 +43,7 @@ const (
 	AuctionService_ListPublicRoomList_FullMethodName     = "/auction.service.v1.AuctionService/ListPublicRoomList"
 	AuctionService_ListBuyerSuggestions_FullMethodName   = "/auction.service.v1.AuctionService/ListBuyerSuggestions"
 	AuctionService_ConsultBuyer_FullMethodName           = "/auction.service.v1.AuctionService/ConsultBuyer"
+	AuctionService_GetRoomPersonalState_FullMethodName   = "/auction.service.v1.AuctionService/GetRoomPersonalState"
 )
 
 // AuctionServiceClient is the client API for AuctionService service.
@@ -174,6 +175,11 @@ type AuctionServiceClient interface {
 	// 用途：根据用户输入的品类、预算或用途，返回公开可见的候选竞拍拍品。
 	// 注意：这里只做找拍品和来源解释，不返回出价建议。
 	ConsultBuyer(ctx context.Context, in *BuyerConsultRequest, opts ...grpc.CallOption) (*BuyerConsultReply, error)
+	// 获取当前买家在房间当前版本上的私有覆盖状态。
+	//
+	// 调用方：已登录观众端。
+	// 用途：私人 WebSocket 增量丢失、订单仍在投影时，只恢复当前用户状态。
+	GetRoomPersonalState(ctx context.Context, in *GetRoomPersonalStateRequest, opts ...grpc.CallOption) (*GetRoomPersonalStateReply, error)
 }
 
 type auctionServiceClient struct {
@@ -424,6 +430,16 @@ func (c *auctionServiceClient) ConsultBuyer(ctx context.Context, in *BuyerConsul
 	return out, nil
 }
 
+func (c *auctionServiceClient) GetRoomPersonalState(ctx context.Context, in *GetRoomPersonalStateRequest, opts ...grpc.CallOption) (*GetRoomPersonalStateReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRoomPersonalStateReply)
+	err := c.cc.Invoke(ctx, AuctionService_GetRoomPersonalState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AuctionServiceServer is the server API for AuctionService service.
 // All implementations must embed UnimplementedAuctionServiceServer
 // for forward compatibility
@@ -553,6 +569,11 @@ type AuctionServiceServer interface {
 	// 用途：根据用户输入的品类、预算或用途，返回公开可见的候选竞拍拍品。
 	// 注意：这里只做找拍品和来源解释，不返回出价建议。
 	ConsultBuyer(context.Context, *BuyerConsultRequest) (*BuyerConsultReply, error)
+	// 获取当前买家在房间当前版本上的私有覆盖状态。
+	//
+	// 调用方：已登录观众端。
+	// 用途：私人 WebSocket 增量丢失、订单仍在投影时，只恢复当前用户状态。
+	GetRoomPersonalState(context.Context, *GetRoomPersonalStateRequest) (*GetRoomPersonalStateReply, error)
 	mustEmbedUnimplementedAuctionServiceServer()
 }
 
@@ -631,6 +652,9 @@ func (UnimplementedAuctionServiceServer) ListBuyerSuggestions(context.Context, *
 }
 func (UnimplementedAuctionServiceServer) ConsultBuyer(context.Context, *BuyerConsultRequest) (*BuyerConsultReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ConsultBuyer not implemented")
+}
+func (UnimplementedAuctionServiceServer) GetRoomPersonalState(context.Context, *GetRoomPersonalStateRequest) (*GetRoomPersonalStateReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRoomPersonalState not implemented")
 }
 func (UnimplementedAuctionServiceServer) mustEmbedUnimplementedAuctionServiceServer() {}
 
@@ -1077,6 +1101,24 @@ func _AuctionService_ConsultBuyer_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AuctionService_GetRoomPersonalState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRoomPersonalStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionServiceServer).GetRoomPersonalState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionService_GetRoomPersonalState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionServiceServer).GetRoomPersonalState(ctx, req.(*GetRoomPersonalStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AuctionService_ServiceDesc is the grpc.ServiceDesc for AuctionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1180,7 +1222,304 @@ var AuctionService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "ConsultBuyer",
 			Handler:    _AuctionService_ConsultBuyer_Handler,
 		},
+		{
+			MethodName: "GetRoomPersonalState",
+			Handler:    _AuctionService_GetRoomPersonalState_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "api/auction/service/v1/auction.proto",
+	Metadata: "auction/service/v1/auction.proto",
+}
+
+const (
+	AuctionCommandService_StartLot_FullMethodName        = "/auction.service.v1.AuctionCommandService/StartLot"
+	AuctionCommandService_PlaceBid_FullMethodName        = "/auction.service.v1.AuctionCommandService/PlaceBid"
+	AuctionCommandService_RevealTrustCard_FullMethodName = "/auction.service.v1.AuctionCommandService/RevealTrustCard"
+	AuctionCommandService_StartDuel_FullMethodName       = "/auction.service.v1.AuctionCommandService/StartDuel"
+	AuctionCommandService_SettleLot_FullMethodName       = "/auction.service.v1.AuctionCommandService/SettleLot"
+	AuctionCommandService_CancelLot_FullMethodName       = "/auction.service.v1.AuctionCommandService/CancelLot"
+)
+
+// AuctionCommandServiceClient is the client API for AuctionCommandService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// AuctionCommandService 是 gateway 到 auction-service 的内部同步边界。
+//
+// 只有会改变竞拍运行态的核心命令进入该服务。反狙击延时属于 PlaceBid
+// 的同一次 Redis Lua 原子裁决，不暴露独立 RPC，避免检查与延时之间产生竞态。
+// 该服务不提供 HTTP 映射，也不应直接暴露到公网。
+type AuctionCommandServiceClient interface {
+	StartLot(ctx context.Context, in *StartLotRequest, opts ...grpc.CallOption) (*StartLotReply, error)
+	PlaceBid(ctx context.Context, in *PlaceBidRequest, opts ...grpc.CallOption) (*PlaceBidReply, error)
+	RevealTrustCard(ctx context.Context, in *RevealTrustCardRequest, opts ...grpc.CallOption) (*RevealTrustCardReply, error)
+	StartDuel(ctx context.Context, in *StartDuelRequest, opts ...grpc.CallOption) (*StartDuelReply, error)
+	SettleLot(ctx context.Context, in *SettleLotRequest, opts ...grpc.CallOption) (*SettleLotReply, error)
+	CancelLot(ctx context.Context, in *CancelLotRequest, opts ...grpc.CallOption) (*CancelLotReply, error)
+}
+
+type auctionCommandServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAuctionCommandServiceClient(cc grpc.ClientConnInterface) AuctionCommandServiceClient {
+	return &auctionCommandServiceClient{cc}
+}
+
+func (c *auctionCommandServiceClient) StartLot(ctx context.Context, in *StartLotRequest, opts ...grpc.CallOption) (*StartLotReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartLotReply)
+	err := c.cc.Invoke(ctx, AuctionCommandService_StartLot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *auctionCommandServiceClient) PlaceBid(ctx context.Context, in *PlaceBidRequest, opts ...grpc.CallOption) (*PlaceBidReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PlaceBidReply)
+	err := c.cc.Invoke(ctx, AuctionCommandService_PlaceBid_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *auctionCommandServiceClient) RevealTrustCard(ctx context.Context, in *RevealTrustCardRequest, opts ...grpc.CallOption) (*RevealTrustCardReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevealTrustCardReply)
+	err := c.cc.Invoke(ctx, AuctionCommandService_RevealTrustCard_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *auctionCommandServiceClient) StartDuel(ctx context.Context, in *StartDuelRequest, opts ...grpc.CallOption) (*StartDuelReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartDuelReply)
+	err := c.cc.Invoke(ctx, AuctionCommandService_StartDuel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *auctionCommandServiceClient) SettleLot(ctx context.Context, in *SettleLotRequest, opts ...grpc.CallOption) (*SettleLotReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SettleLotReply)
+	err := c.cc.Invoke(ctx, AuctionCommandService_SettleLot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *auctionCommandServiceClient) CancelLot(ctx context.Context, in *CancelLotRequest, opts ...grpc.CallOption) (*CancelLotReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelLotReply)
+	err := c.cc.Invoke(ctx, AuctionCommandService_CancelLot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AuctionCommandServiceServer is the server API for AuctionCommandService service.
+// All implementations must embed UnimplementedAuctionCommandServiceServer
+// for forward compatibility
+//
+// AuctionCommandService 是 gateway 到 auction-service 的内部同步边界。
+//
+// 只有会改变竞拍运行态的核心命令进入该服务。反狙击延时属于 PlaceBid
+// 的同一次 Redis Lua 原子裁决，不暴露独立 RPC，避免检查与延时之间产生竞态。
+// 该服务不提供 HTTP 映射，也不应直接暴露到公网。
+type AuctionCommandServiceServer interface {
+	StartLot(context.Context, *StartLotRequest) (*StartLotReply, error)
+	PlaceBid(context.Context, *PlaceBidRequest) (*PlaceBidReply, error)
+	RevealTrustCard(context.Context, *RevealTrustCardRequest) (*RevealTrustCardReply, error)
+	StartDuel(context.Context, *StartDuelRequest) (*StartDuelReply, error)
+	SettleLot(context.Context, *SettleLotRequest) (*SettleLotReply, error)
+	CancelLot(context.Context, *CancelLotRequest) (*CancelLotReply, error)
+	mustEmbedUnimplementedAuctionCommandServiceServer()
+}
+
+// UnimplementedAuctionCommandServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedAuctionCommandServiceServer struct {
+}
+
+func (UnimplementedAuctionCommandServiceServer) StartLot(context.Context, *StartLotRequest) (*StartLotReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartLot not implemented")
+}
+func (UnimplementedAuctionCommandServiceServer) PlaceBid(context.Context, *PlaceBidRequest) (*PlaceBidReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PlaceBid not implemented")
+}
+func (UnimplementedAuctionCommandServiceServer) RevealTrustCard(context.Context, *RevealTrustCardRequest) (*RevealTrustCardReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RevealTrustCard not implemented")
+}
+func (UnimplementedAuctionCommandServiceServer) StartDuel(context.Context, *StartDuelRequest) (*StartDuelReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartDuel not implemented")
+}
+func (UnimplementedAuctionCommandServiceServer) SettleLot(context.Context, *SettleLotRequest) (*SettleLotReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SettleLot not implemented")
+}
+func (UnimplementedAuctionCommandServiceServer) CancelLot(context.Context, *CancelLotRequest) (*CancelLotReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelLot not implemented")
+}
+func (UnimplementedAuctionCommandServiceServer) mustEmbedUnimplementedAuctionCommandServiceServer() {}
+
+// UnsafeAuctionCommandServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AuctionCommandServiceServer will
+// result in compilation errors.
+type UnsafeAuctionCommandServiceServer interface {
+	mustEmbedUnimplementedAuctionCommandServiceServer()
+}
+
+func RegisterAuctionCommandServiceServer(s grpc.ServiceRegistrar, srv AuctionCommandServiceServer) {
+	s.RegisterService(&AuctionCommandService_ServiceDesc, srv)
+}
+
+func _AuctionCommandService_StartLot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartLotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionCommandServiceServer).StartLot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionCommandService_StartLot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionCommandServiceServer).StartLot(ctx, req.(*StartLotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuctionCommandService_PlaceBid_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PlaceBidRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionCommandServiceServer).PlaceBid(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionCommandService_PlaceBid_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionCommandServiceServer).PlaceBid(ctx, req.(*PlaceBidRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuctionCommandService_RevealTrustCard_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevealTrustCardRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionCommandServiceServer).RevealTrustCard(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionCommandService_RevealTrustCard_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionCommandServiceServer).RevealTrustCard(ctx, req.(*RevealTrustCardRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuctionCommandService_StartDuel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartDuelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionCommandServiceServer).StartDuel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionCommandService_StartDuel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionCommandServiceServer).StartDuel(ctx, req.(*StartDuelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuctionCommandService_SettleLot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SettleLotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionCommandServiceServer).SettleLot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionCommandService_SettleLot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionCommandServiceServer).SettleLot(ctx, req.(*SettleLotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AuctionCommandService_CancelLot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelLotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AuctionCommandServiceServer).CancelLot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AuctionCommandService_CancelLot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AuctionCommandServiceServer).CancelLot(ctx, req.(*CancelLotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// AuctionCommandService_ServiceDesc is the grpc.ServiceDesc for AuctionCommandService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AuctionCommandService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "auction.service.v1.AuctionCommandService",
+	HandlerType: (*AuctionCommandServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "StartLot",
+			Handler:    _AuctionCommandService_StartLot_Handler,
+		},
+		{
+			MethodName: "PlaceBid",
+			Handler:    _AuctionCommandService_PlaceBid_Handler,
+		},
+		{
+			MethodName: "RevealTrustCard",
+			Handler:    _AuctionCommandService_RevealTrustCard_Handler,
+		},
+		{
+			MethodName: "StartDuel",
+			Handler:    _AuctionCommandService_StartDuel_Handler,
+		},
+		{
+			MethodName: "SettleLot",
+			Handler:    _AuctionCommandService_SettleLot_Handler,
+		},
+		{
+			MethodName: "CancelLot",
+			Handler:    _AuctionCommandService_CancelLot_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "auction/service/v1/auction.proto",
 }

@@ -44,23 +44,26 @@ export function ShopPage() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    listShopProducts({ category: activeCategory === '推荐' ? undefined : activeCategory, q: submittedQuery || undefined, page: 1, pageSize: 30 })
-      .then((reply) => {
-        if (cancelled) return;
-        setProducts(reply.products.length ? reply.products : FALLBACK_PRODUCTS);
-        setError('');
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setProducts(FALLBACK_PRODUCTS);
-        setError(err instanceof Error ? err.message : '商品加载失败');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      listShopProducts({ category: activeCategory === '推荐' ? undefined : activeCategory, q: submittedQuery || undefined, page: 1, pageSize: 30 })
+        .then((reply) => {
+          if (cancelled) return;
+          setProducts(reply.products.length ? reply.products : FALLBACK_PRODUCTS);
+          setError('');
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          setProducts(FALLBACK_PRODUCTS);
+          setError(err instanceof Error ? err.message : '商品加载失败');
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 0);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [activeCategory, submittedQuery]);
 

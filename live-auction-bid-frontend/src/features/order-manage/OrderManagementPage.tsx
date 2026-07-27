@@ -1,89 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { AlertTriangle, ChevronLeft, ChevronRight, CircleDollarSign, Clock3, Package, ReceiptText, RefreshCw, Search, ShieldAlert, X } from 'lucide-react';
-import { getLotResult, listAdminOrders, type AdminOrdersQuery } from '../order/api/orderApi';
+import type { AdminOrdersQuery } from '../order/api/orderApi';
 import type { DeliveryAddressSnapshot, LotResultReply, OrderSummary } from '../../entities/order/model/orderTypes';
 import { ORDER_STATUS_FILTERS, isAbnormalOrder, isOrderPaidStatus, orderStatusLabel, orderStatusTone, paymentStatusLabel } from '../../entities/order/model/orderStatus';
-import { resultMessage } from '../../shared/api/result';
 import { formatAmountText, formatDateTimeText } from '../../shared/lib/format';
-import { ORDER_REFRESH_EVENTS, REALTIME_EVENT } from '../../shared/realtime/events';
-import { useRoomSocket } from '../../shared/realtime/useRoomSocket';
-import { StudioBadge, StudioButton, StudioCard, StudioEmptyState, StudioErrorState, StudioField, StudioMetricCard, StudioPageHeader, StudioTableSkeleton, StudioToastViewport, useStudioToast } from '../../pages/host-console/components/studio-ui';
-
-type Props = {
-  roomId: string;
-};
+import { StudioBadge, StudioButton, StudioCard, StudioEmptyState, StudioErrorState, StudioField, StudioMetricCard, StudioPageHeader, StudioTableSkeleton, StudioToastViewport } from '../../pages/host-console/components/studio-ui';
+import { useStudioToast } from '../../pages/host-console/components/studio-toast';
+import { useOrderManagementPage } from './model/useOrderManagementPage';
 
 const DEFAULT_PAGE_SIZE = 20;
 
-export function OrderManagementPage({ roomId }: Props) {
-  const [query, setQuery] = useState<AdminOrdersQuery>({ page: 1, pageSize: DEFAULT_PAGE_SIZE });
-  const [orders, setOrders] = useState<OrderSummary[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [detail, setDetail] = useState<LotResultReply | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const { toasts, showToast } = useStudioToast();
-
-  const totalPages = Math.max(1, Math.ceil(total / (query.pageSize || DEFAULT_PAGE_SIZE)));
-  const currentPage = query.page || 1;
-
-  const goPrevPage = () => setQuery((c) => ({ ...c, page: Math.max(1, (c.page || 1) - 1) }));
-  const goNextPage = () => setQuery((c) => ({ ...c, page: (c.page || 1) + 1 }));
-
-  const syncOrders = async (nextQuery = query) => {
-    setLoading(true);
-    setError('');
-    try {
-      const page = await listAdminOrders(nextQuery);
-      setOrders(page.orders);
-      setTotal(page.total);
-      setQuery((current) => ({ ...current, page: page.page, pageSize: page.pageSize }));
-    } catch (e) {
-      const message = resultMessage(e);
-      setError(message);
-      showToast({ id: 'admin-orders-sync-failed', tone: 'danger', title: '订单列表同步失败', description: message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateQuery = (patch: Partial<AdminOrdersQuery>) => {
-    setQuery((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
-  };
-
-  const openDetail = async (order: OrderSummary) => {
-    setDetailLoading(true);
-    setError('');
-    try {
-      const next = await getLotResult(order.lotId);
-      setDetail(next);
-    } catch (e) {
-      const message = resultMessage(e);
-      setError(message);
-      showToast({ id: `order-detail-${order.id}`, tone: 'danger', title: '成交详情加载失败', description: message });
-    } finally {
-      setDetailLoading(false);
-    }
-  };
-
-  useRoomSocket({
-    roomId,
-    handledEventTypes: ORDER_REFRESH_EVENTS,
-    onEvent: (event) => {
-      showToast({
-        id: `order-refresh-${event.type}-${event.lotId || Date.now()}`,
-        tone: event.type === REALTIME_EVENT.PAYMENT_SUCCESS ? 'success' : 'info',
-        title: event.type === REALTIME_EVENT.PAYMENT_SUCCESS ? '支付状态已更新' : '成交状态已更新',
-        description: event.lotId || '已收到房间事件，正在刷新订单列表',
-      });
-      void syncOrders();
-    },
-    onError: (e) => setError(resultMessage(e)),
-  });
-
-  useEffect(() => { void syncOrders(); }, []);
-  useEffect(() => { void syncOrders(query); }, [query.page, query.status]);
+export function OrderManagementPage() {
+  const { toasts } = useStudioToast();
+  const { query, orders, total, loading, error, detail, detailLoading, closeDetail, totalPages, currentPage, goPrevPage, goNextPage, syncOrders, updateQuery, openDetail } = useOrderManagementPage(DEFAULT_PAGE_SIZE);
 
   const metrics = useMemo(() => {
     const pending = orders.filter((order) => order.status === 'PENDING_PAYMENT').length;
@@ -131,7 +60,7 @@ export function OrderManagementPage({ roomId }: Props) {
         {orders.map((order) => <OrderReviewCard key={order.id} order={order} disabled={detailLoading} onOpen={(nextOrder) => void openDetail(nextOrder)} />)}
       </section> : <StudioEmptyState icon={<Package size={34} />} title="暂无订单" description="当前筛选条件下后端没有返回订单。尝试调整筛选条件或确认本场是否已有落锤拍品。" action={<StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} onClick={() => void syncOrders()}>重新同步</StudioButton>} compact />}
     </section>}
-    {detail ? <OrderDetailDrawer detail={detail} loading={detailLoading} onClose={() => setDetail(null)} /> : null}
+    {detail ? <OrderDetailDrawer detail={detail} loading={detailLoading} onClose={closeDetail} /> : null}
   </section>;
 }
 

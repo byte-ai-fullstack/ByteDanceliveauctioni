@@ -2,11 +2,25 @@ package data
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"live-auction-bid/backend/app/auction/service/internal/biz/auction"
 	"live-auction-bid/backend/app/auction/service/internal/biz/shop"
+	"live-auction-bid/backend/app/auction/service/internal/orderenrichment"
 )
+
+type legacyAuctionOrderPayload struct {
+	OrderID         string `json:"orderId"`
+	MainAccountID   string `json:"mainAccountId"`
+	BuyerUserID     string `json:"buyerUserId"`
+	BuyerNickname   string `json:"buyerNickname"`
+	Title           string `json:"title"`
+	ImageURL        string `json:"imageUrl"`
+	TotalAmountFen  string `json:"totalAmountFen"`
+	Currency        string `json:"currency"`
+	CreatedAtUnixMs string `json:"createdAtUnixMs"`
+}
 
 const (
 	userOrderSourceAuction = "auction"
@@ -144,7 +158,14 @@ func userModelToAuctionOrder(model *UserOrderModel) (*auction.Order, error) {
 	var order auction.Order
 	if strings.TrimSpace(model.SourcePayload) != "" {
 		if err := json.Unmarshal([]byte(model.SourcePayload), &order); err != nil {
-			return nil, err
+			legacyOrder, matched, legacyErr := decodeLegacyAuctionOrderPayload(model.SourcePayload)
+			if legacyErr != nil {
+				return nil, legacyErr
+			}
+			if !matched {
+				return nil, err
+			}
+			order = legacyOrder
 		}
 	}
 	order.ID = model.ID
@@ -154,13 +175,7 @@ func userModelToAuctionOrder(model *UserOrderModel) (*auction.Order, error) {
 	order.Status = userOrderStatusToAuction(model.Status)
 	order.PaymentStatus = userPaymentStatusToAuction(model.PaymentStatus)
 	order.PaymentID = model.PaymentID
-	order.ShippingAddressID = model.ShippingAddressID
-	if strings.TrimSpace(model.ShippingAddressSnapshot) != "" {
-		var snapshot shop.DeliveryAddressSnapshot
-		if err := json.Unmarshal([]byte(model.ShippingAddressSnapshot), &snapshot); err == nil && snapshot.AddressID != "" {
-			order.ShippingAddressSnapshot = &snapshot
-		}
-	}
+	order.EnrichmentStatus = orderenrichment.StatusPending
 	order.LotTitle = model.Title
 	order.Amount = model.TotalAmount
 	order.Currency = model.Currency
@@ -170,6 +185,43 @@ func userModelToAuctionOrder(model *UserOrderModel) (*auction.Order, error) {
 	order.PaidAtUnixMs = model.PaidAtUnixMs
 	order.Version = model.Version
 	return &order, nil
+}
+
+func decodeLegacyAuctionOrderPayload(raw string) (auction.Order, bool, error) {
+	var payload legacyAuctionOrderPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return auction.Order{}, false, err
+	}
+	if strings.TrimSpace(payload.OrderID) == "" &&
+		strings.TrimSpace(payload.TotalAmountFen) == "" &&
+		strings.TrimSpace(payload.CreatedAtUnixMs) == "" {
+		return auction.Order{}, false, nil
+	}
+	order := auction.Order{
+		ID:            payload.OrderID,
+		MainAccountID: payload.MainAccountID,
+		BuyerUserID:   payload.BuyerUserID,
+		BuyerNickname: payload.BuyerNickname,
+		LotTitle:      payload.Title,
+		LotImageURL:   payload.ImageURL,
+		Currency:      payload.Currency,
+	}
+	if strings.TrimSpace(payload.TotalAmountFen) != "" {
+		amount, err := strconv.ParseInt(payload.TotalAmountFen, 10, 64)
+		if err != nil {
+			return auction.Order{}, false, err
+		}
+		order.Amount = amount
+	}
+	if strings.TrimSpace(payload.CreatedAtUnixMs) != "" {
+		createdAtUnixMs, err := strconv.ParseInt(payload.CreatedAtUnixMs, 10, 64)
+		if err != nil {
+			return auction.Order{}, false, err
+		}
+		order.CreatedAtUnixMs = createdAtUnixMs
+		order.UpdatedAtUnixMs = createdAtUnixMs
+	}
+	return order, true, nil
 }
 
 func userModelToAuctionOrderWithItem(model *UserOrderModel, items []UserOrderItemModel) (*auction.Order, error) {
@@ -260,7 +312,7 @@ func userOrderFromModels(model UserOrderModel, itemModels []UserOrderItemModel) 
 			Currency:     item.Currency,
 		})
 	}
-	return shop.UserOrder{
+	order := shop.UserOrder{
 		ID:                      model.ID,
 		Source:                  shop.OrderSource(model.Source),
 		SourceOrderID:           model.SourceOrderID,
@@ -286,21 +338,14 @@ func userOrderFromModels(model UserOrderModel, itemModels []UserOrderItemModel) 
 		PaymentIdempotencyKey:   model.PaymentIdempotencyKey,
 		Items:                   items,
 	}
-}
-
-func userPaymentFromModel(model UserOrderPaymentModel) shop.UserOrderPayment {
-	return shop.UserOrderPayment{
-		ID:              model.ID,
-		OrderID:         model.OrderID,
-		Source:          shop.OrderSource(model.Source),
-		Provider:        model.Provider,
-		UserID:          model.UserID,
-		Status:          shop.PaymentStatus(model.Status),
-		Amount:          model.Amount,
-		Currency:        model.Currency,
-		IdempotencyKey:  model.IdempotencyKey,
-		CreatedAtUnixMs: model.CreatedAtUnixMs,
-		UpdatedAtUnixMs: model.UpdatedAtUnixMs,
-		SucceededAtMs:   model.SucceededAtMs,
+	if model.Source == userOrderSourceAuction {
+		order.ShopName = ""
+		order.ShippingAddressID = ""
+		order.ShippingAddressSnapshot = nil
+		order.AddressSnapshot = ""
+		order.EnrichmentStatus = orderenrichment.StatusPending
+	} else {
+		order.EnrichmentStatus = orderenrichment.StatusReady
 	}
+	return order
 }

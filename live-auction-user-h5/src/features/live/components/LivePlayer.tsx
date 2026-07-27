@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  isHls,
-  resolveInitialLiveSource,
-  resolveLivePlaylist,
-  resolveNextLiveSource,
-} from '../hooks/useLivePlayer';
+import { getServerNowMs } from '../../../shared/lib/time';
+import { isHls, resolveLiveSource } from '../hooks/useLivePlayer';
 import { LiveOverlay } from './LiveOverlay';
 
 type Props = {
@@ -14,20 +10,26 @@ type Props = {
   wsState: string;
   roomName: string;
   source?: string;
-  onSourceChange?: (source: string) => void;
+  liveStartedAtUnixMs?: number | string;
+  serverTimeUnixMs?: number | string;
+  serverTimeReceivedAtUnixMs?: number;
 };
 
-export function LivePlayer({ poster, anchorName, onlineCount, wsState, roomName, source: controlledSource, onSourceChange }: Props) {
+export function LivePlayer({
+  poster,
+  anchorName,
+  onlineCount,
+  wsState,
+  roomName,
+  source: controlledSource,
+  liveStartedAtUnixMs,
+  serverTimeUnixMs,
+  serverTimeReceivedAtUnixMs,
+}: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [internalSource, setInternalSource] = useState(resolveInitialLiveSource);
+  const [internalSource] = useState(resolveLiveSource);
   const source = controlledSource || internalSource;
   const [message, setMessage] = useState('');
-  const playlist = resolveLivePlaylist();
-  const hasPlaylistLoop = playlist.length > 1;
-  const updateSource = useCallback((nextSource: string) => {
-    if (onSourceChange) onSourceChange(nextSource);
-    else setInternalSource(nextSource);
-  }, [onSourceChange]);
 
   const playVideo = () => {
     const video = videoRef.current;
@@ -39,13 +41,18 @@ export function LivePlayer({ poster, anchorName, onlineCount, wsState, roomName,
     void video.play().catch(() => undefined);
   };
 
-  const goNext = useCallback(() => {
-    const nextSource = resolveNextLiveSource(source);
-    if (nextSource && nextSource !== source) {
-      setMessage('直播画面加载中');
-      updateSource(nextSource);
+  const syncPlaybackPosition = useCallback(() => {
+    const video = videoRef.current;
+    const liveStartedAt = Number(liveStartedAtUnixMs || 0);
+    if (!video || !Number.isFinite(liveStartedAt) || liveStartedAt <= 0) return;
+    if (!Number.isFinite(video.duration) || video.duration <= 1) return;
+    const serverNow = getServerNowMs(serverTimeUnixMs, serverTimeReceivedAtUnixMs);
+    const elapsedSeconds = Math.max(0, (serverNow - liveStartedAt) / 1000);
+    const targetTime = elapsedSeconds % video.duration;
+    if (Math.abs(video.currentTime - targetTime) > 2.5) {
+      video.currentTime = targetTime;
     }
-  }, [source, updateSource]);
+  }, [liveStartedAtUnixMs, serverTimeReceivedAtUnixMs, serverTimeUnixMs]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -59,11 +66,6 @@ export function LivePlayer({ poster, anchorName, onlineCount, wsState, roomName,
 
     if (isHls(source) && !video.canPlayType('application/vnd.apple.mpegurl')) {
       setMessage('当前浏览器不支持 HLS 直播源');
-      if (hasPlaylistLoop) {
-        retryTimers.push(window.setTimeout(() => {
-          if (!disposed) goNext();
-        }, 1200));
-      }
       return () => {
         disposed = true;
         retryTimers.forEach((timer) => window.clearTimeout(timer));
@@ -74,7 +76,10 @@ export function LivePlayer({ poster, anchorName, onlineCount, wsState, roomName,
     video.load();
 
     const tryPlay = () => {
-      if (!disposed) playVideo();
+      if (!disposed) {
+        syncPlaybackPosition();
+        playVideo();
+      }
     };
     retryTimers.push(
       window.setTimeout(tryPlay, 0),
@@ -89,7 +94,12 @@ export function LivePlayer({ poster, anchorName, onlineCount, wsState, roomName,
       video.removeAttribute('src');
       video.load();
     };
-  }, [goNext, hasPlaylistLoop, source]);
+  }, [source, syncPlaybackPosition]);
+
+  useEffect(() => {
+    const timer = window.setInterval(syncPlaybackPosition, 15000);
+    return () => window.clearInterval(timer);
+  }, [syncPlaybackPosition]);
 
   return (
     <section className="livePlayerShell">
@@ -101,20 +111,16 @@ export function LivePlayer({ poster, anchorName, onlineCount, wsState, roomName,
         muted
         playsInline
         preload="auto"
-        loop={!hasPlaylistLoop && !isHls(source)}
+        loop={!isHls(source)}
         onCanPlay={() => {
           setMessage('');
+          syncPlaybackPosition();
           playVideo();
         }}
+        onLoadedMetadata={syncPlaybackPosition}
         onPlaying={() => setMessage('')}
         onWaiting={() => setMessage('直播画面加载中')}
-        onEnded={() => {
-          if (hasPlaylistLoop) goNext();
-        }}
-        onError={() => {
-          if (hasPlaylistLoop) goNext();
-          else setMessage('直播画面加载失败');
-        }}
+        onError={() => setMessage('直播画面加载失败')}
       />
       {message ? <div className="playerMessage">{message}</div> : null}
       <LiveOverlay anchorName={anchorName} onlineCount={onlineCount} wsState={wsState} roomName={roomName} />

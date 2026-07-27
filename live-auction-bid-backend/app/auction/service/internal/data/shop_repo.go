@@ -496,12 +496,14 @@ func (s *Store) FindUserOrder(ctx context.Context, userID, orderID string) (*sho
 		}
 		return nil, err
 	}
-	items, err := s.findUserOrderItems(ctx, model.ID)
+	orders, err := s.userOrdersFromModels(ctx, []UserOrderModel{model})
 	if err != nil {
 		return nil, err
 	}
-	order := userOrderFromModels(model, items)
-	return &order, nil
+	if len(orders) != 1 {
+		return nil, errors.New("user order composition returned an unexpected result count")
+	}
+	return &orders[0], nil
 }
 
 func (s *Store) ListUserOrders(ctx context.Context, query shop.OrderQuery) (shop.UserOrderList, error) {
@@ -523,7 +525,8 @@ func (s *Store) ListUserOrders(ctx context.Context, query shop.OrderQuery) (shop
 	if keyword := strings.TrimSpace(query.Query); keyword != "" {
 		like := "%" + keyword + "%"
 		db = db.Where(
-			"order_no LIKE ? OR title LIKE ? OR shop_name LIKE ? OR EXISTS (SELECT 1 FROM user_order_items WHERE user_order_items.order_id = user_orders.id AND user_order_items.title LIKE ?)",
+			"order_no LIKE ? OR title LIKE ? OR shop_name LIKE ? OR EXISTS (SELECT 1 FROM user_order_items WHERE user_order_items.order_id = user_orders.id AND user_order_items.title LIKE ?) OR EXISTS (SELECT 1 FROM auction_order_enrichments WHERE auction_order_enrichments.order_id = user_orders.id AND JSON_UNQUOTE(JSON_EXTRACT(auction_order_enrichments.shop_snapshot, '$.shopName')) LIKE ?)",
+			like,
 			like,
 			like,
 			like,
@@ -715,9 +718,18 @@ func (s *Store) userOrdersFromModels(ctx context.Context, models []UserOrderMode
 	if err != nil {
 		return nil, err
 	}
+	enrichments, err := s.orderEnrichmentsByOrderID(ctx, models)
+	if err != nil {
+		return nil, err
+	}
 	orders := make([]shop.UserOrder, 0, len(models))
 	for _, model := range models {
-		orders = append(orders, userOrderFromModels(model, itemsByOrder[model.ID]))
+		order := userOrderFromModels(model, itemsByOrder[model.ID])
+		enrichment, found := enrichments[model.ID]
+		if err := applyUserOrderEnrichment(&order, enrichment, found); err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
 	}
 	return orders, nil
 }

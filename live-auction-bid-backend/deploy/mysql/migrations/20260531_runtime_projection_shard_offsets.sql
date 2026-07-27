@@ -1,8 +1,0 @@
-CREATE TABLE IF NOT EXISTS auction_runtime_projection_shard_offsets (
-  shard_id INT NOT NULL PRIMARY KEY,
-  last_stream_id VARCHAR(64) NOT NULL DEFAULT '0-0',
-  last_projected_at_unix_ms BIGINT NOT NULL DEFAULT 0,
-  updated_at_unix_ms BIGINT NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

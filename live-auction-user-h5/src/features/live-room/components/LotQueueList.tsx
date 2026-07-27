@@ -44,8 +44,9 @@ function lotResultPrice(lot: Lot) {
   return lot.rule.startPrice;
 }
 
-function queueLotView(lot: Lot, order: OrderSummary | null, paymentKnownPaid: boolean, nowMs?: number): QueueLotView {
-  const displayState = deriveLotDisplayState(lot, { order, paymentKnownPaid, nowMs });
+function queueLotView(lot: Lot, order: OrderSummary | null, paymentKnownPaid: boolean, nowMs?: number, currentLotId?: string): QueueLotView {
+  const derivedState = deriveLotDisplayState(lot, { order, paymentKnownPaid, nowMs });
+  const displayState = derivedState === 'live' && currentLotId && lot.id !== currentLotId ? 'syncing' : derivedState;
   const hasBid = lotHasBid(lot);
   const canPay = displayState === 'pendingPayment' && canPayOrder(order);
   const resultPrice = lotResultPrice(lot);
@@ -69,7 +70,9 @@ function queueLotView(lot: Lot, order: OrderSummary | null, paymentKnownPaid: bo
     : formatMoney(lot.rule.startPrice);
   const statusText = displayState === 'live'
     ? '竞拍中'
-    : displayState === 'upcoming' || displayState === 'syncing'
+    : displayState === 'syncing'
+      ? '状态同步中'
+      : displayState === 'upcoming'
       ? '即将开拍'
       : displayState === 'pendingPayment'
         ? '截拍中'
@@ -154,10 +157,11 @@ function EcomCountdownTag({ endsAtUnixMs, nowMs }: { endsAtUnixMs?: number | str
   return <span className={`dyEcomCountdownTag${leftMs > 0 && leftMs < 10000 ? ' danger' : ''}`}>距离拍还剩 {formatLeftMs(leftMs)}</span>;
 }
 
-function lotSortScore(lot: Lot, order: OrderSummary | null, paymentKnownPaid: boolean, nowMs?: number): number {
-  const displayState = deriveLotDisplayState(lot, { order, paymentKnownPaid, nowMs });
+function lotSortScore(lot: Lot, order: OrderSummary | null, paymentKnownPaid: boolean, nowMs?: number, currentLotId?: string): number {
+  const derivedState = deriveLotDisplayState(lot, { order, paymentKnownPaid, nowMs });
+  const displayState = derivedState === 'live' && currentLotId && lot.id !== currentLotId ? 'syncing' : derivedState;
   if (displayState === 'live') return 0;
-  if (lot.status === LOT_STATUS.LIVE || lot.status === LOT_STATUS.EXTENDED) return 0;
+  if ((lot.status === LOT_STATUS.LIVE || lot.status === LOT_STATUS.EXTENDED) && (!currentLotId || lot.id === currentLotId)) return 0;
   if (displayState === 'upcoming') {
     if (lot.status === LOT_STATUS.QUEUED) return 2;
     return 3;
@@ -206,7 +210,7 @@ export function LotQueueList({
   const hideBidPulseTimerRef = useRef<number | null>(null);
   const visibleLots = lots.filter((lot) => lotIsDisplayable(lot) && lotIsFromToday(lot, nowMs));
   const sortedLots = [...visibleLots].sort((a, b) => {
-    const scoreDiff = lotSortScore(a, orderForLot(orders, a), Boolean(paidLotIds[a.id]), nowMs) - lotSortScore(b, orderForLot(orders, b), Boolean(paidLotIds[b.id]), nowMs);
+    const scoreDiff = lotSortScore(a, orderForLot(orders, a), Boolean(paidLotIds[a.id]), nowMs, currentLotId) - lotSortScore(b, orderForLot(orders, b), Boolean(paidLotIds[b.id]), nowMs, currentLotId);
     if (scoreDiff) return scoreDiff;
     return (a.queuePosition || 9999) - (b.queuePosition || 9999);
   });
@@ -297,7 +301,7 @@ export function LotQueueList({
         {sortedLots.map((lot, index) => {
           const lotOrder = ownOrderForLot(orderForLot(orders, lot), meId, lot.id);
           const payableOrder = canPayOrder(lotOrder) ? lotOrder : null;
-          const view = queueLotView(lot, lotOrder, Boolean(paidLotIds[lot.id]), nowMs);
+          const view = queueLotView(lot, lotOrder, Boolean(paidLotIds[lot.id]), nowMs, currentLotId);
           const active = lot.id === currentLotId;
           const selected = lot.id === selectedLotId;
           const priceParts = ecomPriceParts(view.priceValue);

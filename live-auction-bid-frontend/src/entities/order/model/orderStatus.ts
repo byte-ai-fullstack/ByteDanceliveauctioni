@@ -1,7 +1,8 @@
 import type { StudioTone } from '../../../pages/host-console/components/studio-ui';
+import type { components } from '../../../shared/api/generated/auction.schema';
 
-export type OrderStatus = 'CREATED' | 'PENDING_PAYMENT' | 'PAID' | 'CANCELLED' | 'EXPIRED' | 'REFUNDED' | (string & {});
-export type PaymentStatus = 'INIT' | 'PROCESSING' | 'SUCCESS' | 'FAILED' | 'CLOSED' | (string & {});
+export type OrderStatus = components['schemas']['OrderStatus'] | 'EXPIRED' | 'REFUNDED' | (string & {});
+export type PaymentStatus = components['schemas']['PaymentStatus'] | 'CLOSED' | (string & {});
 
 export const ORDER_STATUS_FILTERS: Array<{ label: string; value: OrderStatus | '' }> = [
   { label: '全部状态', value: '' },
@@ -51,7 +52,7 @@ export function isOrderPaidStatus(status?: string | null, paymentStatus?: string
     || String(paymentStatus || '').toUpperCase() === 'SUCCESS';
 }
 
-export function orderPaymentExpired(expiresAtUnixMs?: number | string | null, nowMs = Date.now()) {
+function orderPaymentExpired(expiresAtUnixMs?: number | string | null, nowMs = Date.now()) {
   const expiresAt = Number(expiresAtUnixMs || 0);
   return Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= nowMs;
 }
@@ -61,10 +62,6 @@ export function isOrderClosedStatus(status?: string | null, paymentStatus?: stri
   return orderPaymentExpired(expiresAtUnixMs, nowMs)
     || ['CANCELLED', 'EXPIRED', 'REFUNDED'].includes(String(status || '').toUpperCase())
     || ['FAILED', 'CLOSED'].includes(String(paymentStatus || '').toUpperCase());
-}
-
-export function isOrderPayingStatus(status?: string | null, paymentStatus?: string | null, expiresAtUnixMs?: number | string | null, nowMs = Date.now()) {
-  return !isOrderPaidStatus(status, paymentStatus) && !isOrderClosedStatus(status, paymentStatus, expiresAtUnixMs, nowMs);
 }
 
 export function isAbnormalOrder(status?: string | null, paymentStatus?: string | null) {

@@ -7,14 +7,16 @@ BACKEND_DIR="${BACKEND_DIR:-$ROOT_DIR}"
 ADMIN_DIR="${ADMIN_DIR:-$WORKSPACE_DIR/live-auction-bid-frontend}"
 H5_DIR="${H5_DIR:-$WORKSPACE_DIR/live-auction-user-h5}"
 
-SERVER_HOST="${SERVER_HOST:-}"
+SERVER_HOST="${SERVER_HOST:-120.79.7.110}"
 SERVER_USER="${SERVER_USER:-root}"
 SERVER_DIR="${SERVER_DIR:-/opt/live-auction}"
-SSH_KEY_SOURCE="${SSH_KEY:-}"
-SSH_KEY_RUNTIME="${SSH_KEY_RUNTIME:-/tmp/live-auction-deploy-key.pem}"
+SSH_KEY_SOURCE="${SSH_KEY:-/home/ye/OpenClaw/workspace/plans/yexieer.pem}"
+SSH_KEY_RUNTIME="${SSH_KEY_RUNTIME:-/tmp/live-auction-yexieer.pem}"
 WORK_DIR="${WORK_DIR:-/tmp/live-auction-deploy-fast}"
 INSTALL_NGINX_CONF="${INSTALL_NGINX_CONF:-0}"
 INCLUDE_OBSERVABILITY_IMAGES="${INCLUDE_OBSERVABILITY_IMAGES:-1}"
+BACKEND_BUILD_IMAGE="${BACKEND_BUILD_IMAGE:-live-auction-bid-backend:release-build}"
+ELASTICSEARCH_BUILD_IMAGE="${ELASTICSEARCH_BUILD_IMAGE:-live-auction-elasticsearch:release-build}"
 
 RUN_BACKEND=1
 RUN_ADMIN=1
@@ -33,11 +35,14 @@ Options:
 
 Environment:
   SSH_KEY=/path/to/key.pem
-  SERVER_HOST=your.server.example
+  SERVER_HOST=120.79.7.110
   SERVER_USER=root
   SERVER_DIR=/opt/live-auction
   INSTALL_NGINX_CONF=1
   INCLUDE_OBSERVABILITY_IMAGES=1
+
+The deployment host must already contain SERVER_DIR/.env with mode 0600.
+Application containers are started from image IDs recorded in SERVER_DIR/.release.env.
 EOF
 }
 
@@ -76,17 +81,16 @@ require_file() {
   fi
 }
 
-require_env() {
-  if [[ -z "${!1:-}" ]]; then
-    echo "Missing required environment variable: $1" >&2
-    exit 1
-  fi
-}
-
 run() {
   echo
   echo "==> $*"
   "$@"
+}
+
+save_images_archive() {
+  local destination="$1"
+  shift
+  docker save "$@" | gzip -1 >"$destination"
 }
 
 build_frontend() {
@@ -110,8 +114,6 @@ ensure_clean_git() {
 }
 
 prepare_ssh_key() {
-  require_env SERVER_HOST
-  require_env SSH_KEY_SOURCE
   require_file "$SSH_KEY_SOURCE"
   cp "$SSH_KEY_SOURCE" "$SSH_KEY_RUNTIME"
   chmod 600 "$SSH_KEY_RUNTIME"
@@ -165,12 +167,34 @@ prepare_packages() {
     if [[ "$RUN_TESTS" -eq 1 ]]; then
       run env GOCACHE=/tmp/live-auction-go-cache go -C "$BACKEND_DIR" test ./...
     fi
-    run docker compose -f "$BACKEND_DIR/deploy/docker-compose.yml" build auction-backend
-    run docker tag live-auction-bid-backend:local live-auction-bid-backend:prod
+    run docker build --file "$BACKEND_DIR/deploy/Dockerfile" --tag "$BACKEND_BUILD_IMAGE" "$BACKEND_DIR"
+    run docker build --file "$BACKEND_DIR/deploy/elasticsearch/Dockerfile" --tag "$ELASTICSEARCH_BUILD_IMAGE" "$BACKEND_DIR"
+    local backend_image_id
+    local elasticsearch_image_id
+    backend_image_id="$(docker image inspect --format '{{.Id}}' "$BACKEND_BUILD_IMAGE")"
+    elasticsearch_image_id="$(docker image inspect --format '{{.Id}}' "$ELASTICSEARCH_BUILD_IMAGE")"
+    printf 'LIVE_AUCTION_BACKEND_IMAGE=%s\nLIVE_AUCTION_ELASTICSEARCH_IMAGE=%s\n' \
+      "$backend_image_id" "$elasticsearch_image_id" >"$WORK_DIR/release-images.env"
+    run "$BACKEND_DIR/scripts/verify-prod-release-images.sh" "$WORK_DIR/release-images.env"
     run git -C "$BACKEND_DIR" archive --format=tar.gz -o "$WORK_DIR/backend-src.tar.gz" HEAD
-    run bash -lc "docker save live-auction-bid-backend:prod | gzip -1 > '$WORK_DIR/backend-image.tar.gz'"
+    run save_images_archive "$WORK_DIR/application-images.tar.gz" "$backend_image_id" "$elasticsearch_image_id"
     if [[ "$INCLUDE_OBSERVABILITY_IMAGES" == "1" ]]; then
-      run bash -lc "docker save prom/prometheus:v2.53.1 grafana/grafana:11.1.4 | gzip -1 > '$WORK_DIR/observability-images.tar.gz'"
+      local observability_images=(
+        prom/prometheus:v2.53.1
+        grafana/grafana:11.1.4
+        danielqsj/kafka-exporter:v1.9.0
+        oliver006/redis_exporter:v1.84.0
+        natsio/prometheus-nats-exporter:0.18.0
+        prometheuscommunity/elasticsearch-exporter:v1.10.0
+        prometheuscommunity/postgres-exporter:v0.19.1
+        quay.io/prometheus/mysqld-exporter:v0.19.0
+        quay.io/prometheus/node-exporter:v1.11.1
+      )
+      local image
+      for image in "${observability_images[@]}"; do
+        run docker pull "$image"
+      done
+      run save_images_archive "$WORK_DIR/observability-images.tar.gz" "${observability_images[@]}"
     fi
   fi
 
@@ -191,7 +215,7 @@ deploy_remote() {
   run remote "mkdir -p '$SERVER_DIR/uploads' '$SERVER_DIR/www' '$SERVER_DIR/backend'"
 
   local upload_files=()
-  [[ "$RUN_BACKEND" -eq 1 ]] && upload_files+=("$WORK_DIR/backend-src.tar.gz" "$WORK_DIR/backend-image.tar.gz")
+  [[ "$RUN_BACKEND" -eq 1 ]] && upload_files+=("$WORK_DIR/backend-src.tar.gz" "$WORK_DIR/application-images.tar.gz" "$WORK_DIR/release-images.env")
   [[ "$RUN_BACKEND" -eq 1 && "$INCLUDE_OBSERVABILITY_IMAGES" == "1" ]] && upload_files+=("$WORK_DIR/observability-images.tar.gz")
   [[ "$RUN_ADMIN" -eq 1 ]] && upload_files+=("$WORK_DIR/admin-dist.tar.gz")
   [[ "$RUN_H5" -eq 1 ]] && upload_files+=("$WORK_DIR/h5-dist.tar.gz")
@@ -203,16 +227,28 @@ deploy_remote() {
 set -euo pipefail
 cd '$SERVER_DIR'
 
+if [[ ! -f .env ]]; then
+  echo "Missing pre-provisioned production environment: $SERVER_DIR/.env" >&2
+  exit 1
+fi
+chmod 600 .env
+
 if [[ $RUN_BACKEND -eq 1 ]]; then
   rm -rf backend.new
   mkdir -p backend.new
   tar -xzf uploads/backend-src.tar.gz -C backend.new
-  gzip -dc uploads/backend-image.tar.gz | docker load
+  if [[ -e backend.new/deploy/.env ]]; then
+    echo "Refusing deployment archive containing deploy/.env" >&2
+    exit 1
+  fi
+  install -m 0644 uploads/release-images.env .release.env.new
+  backend.new/scripts/verify-prod-release-images.sh .release.env.new
+  gzip -dc uploads/application-images.tar.gz | docker load
+  backend.new/scripts/verify-prod-release-images.sh .release.env.new --inspect
   if [[ '$INCLUDE_OBSERVABILITY_IMAGES' == '1' && -f uploads/observability-images.tar.gz ]]; then
     gzip -dc uploads/observability-images.tar.gz | docker load
   fi
   cp backend.new/deploy/prod/docker-compose.yml docker-compose.yml
-  cp backend.new/deploy/.env .env
   cp backend.new/deploy/prod/live-auction.nginx.conf live-auction.nginx.conf
   if [[ '$INSTALL_NGINX_CONF' == '1' ]]; then
     cp live-auction.nginx.conf /etc/nginx/sites-available/live-auction
@@ -220,7 +256,14 @@ if [[ $RUN_BACKEND -eq 1 ]]; then
   fi
   rm -rf backend
   mv backend.new backend
+  mv .release.env.new .release.env
 fi
+
+if [[ ! -f .release.env ]]; then
+  echo "Missing immutable production image manifest: $SERVER_DIR/.release.env" >&2
+  exit 1
+fi
+backend/scripts/verify-prod-release-images.sh .release.env --inspect
 
 if [[ $RUN_ADMIN -eq 1 ]]; then
   rm -rf www/admin.new
@@ -239,7 +282,7 @@ if [[ $RUN_H5 -eq 1 ]]; then
 fi
 
 chmod 755 '$SERVER_DIR' '$SERVER_DIR/www' '$SERVER_DIR/www/admin' '$SERVER_DIR/www/h5'
-docker compose up -d --no-build
+docker compose --env-file .env --env-file .release.env up -d --no-build
 systemctl reload nginx
 
 for i in \$(seq 1 30); do
@@ -254,7 +297,7 @@ for i in \$(seq 1 30); do
 done
 curl -fsS -o /tmp/live-auction-h5.html -w "\\nH5 %{http_code} %{size_download}\\n" http://127.0.0.1/
 curl -fsS -o /tmp/live-auction-admin.html -w "ADMIN %{http_code} %{size_download}\\n" http://127.0.0.1:8080/
-docker compose ps
+docker compose --env-file .env --env-file .release.env ps
 EOF
 )
 

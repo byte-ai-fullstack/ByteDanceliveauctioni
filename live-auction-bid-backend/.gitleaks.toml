@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Elasticsearch healthcheck passes the required runtime environment variable to localhost curl."
+targetRules = ["curl-auth-user"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''deploy/prod/docker-compose\.yml$''']
+regexes = ['''curl -fsS -u 'elastic:\$\$\{ELASTIC_PASSWORD\}' 'http://127\.0\.0\.1:9200/_cluster/health\?wait_for_status=yellow&timeout=5s' >/dev/null''']

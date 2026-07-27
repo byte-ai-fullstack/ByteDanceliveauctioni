@@ -9,13 +9,15 @@ PERF_NGINX="${PERF_NGINX:-$SERVER_DIR/backend/deploy/prod/live-auction.perf-3x.n
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/live-auction}"
 ACTION="${1:-status}"
 export LIVE_AUCTION_ENV_FILE="${LIVE_AUCTION_ENV_FILE:-$SERVER_DIR/.env}"
+export LIVE_AUCTION_RELEASE_ENV_FILE="${LIVE_AUCTION_RELEASE_ENV_FILE:-$SERVER_DIR/.release.env}"
+RELEASE_IMAGE_VALIDATOR="${RELEASE_IMAGE_VALIDATOR:-$SERVER_DIR/backend/scripts/verify-prod-release-images.sh}"
 
 compose() {
-  docker compose -f "$BASE_COMPOSE" -f "$PERF_COMPOSE" "$@"
+  docker compose --env-file "$LIVE_AUCTION_ENV_FILE" --env-file "$LIVE_AUCTION_RELEASE_ENV_FILE" -f "$BASE_COMPOSE" -f "$PERF_COMPOSE" "$@"
 }
 
 single_compose() {
-  docker compose -f "$BASE_COMPOSE" "$@"
+  docker compose --env-file "$LIVE_AUCTION_ENV_FILE" --env-file "$LIVE_AUCTION_RELEASE_ENV_FILE" -f "$BASE_COMPOSE" "$@"
 }
 
 require_file() {
@@ -23,6 +25,13 @@ require_file() {
     echo "Missing required file: $1" >&2
     exit 1
   fi
+}
+
+require_release_images() {
+  require_file "$LIVE_AUCTION_ENV_FILE"
+  require_file "$LIVE_AUCTION_RELEASE_ENV_FILE"
+  require_file "$RELEASE_IMAGE_VALIDATOR"
+  "$RELEASE_IMAGE_VALIDATOR" "$LIVE_AUCTION_RELEASE_ENV_FILE" --inspect
 }
 
 install_nginx() {
@@ -88,6 +97,8 @@ status() {
   done
   curl -fsS -o /dev/null -w "nginx unified: %{http_code}\n" "http://127.0.0.1/readyz" || true
 }
+
+require_release_images
 
 case "$ACTION" in
   up)

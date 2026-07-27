@@ -1,9 +1,13 @@
 import type { Lot, ReplyResult } from '../../../shared/api/types';
+import type { components } from '../../../shared/api/generated/auction.schema';
 import type { OrderStatus, PaymentStatus } from './orderStatus';
 
-export type AuctionState = 'DRAFT' | 'QUEUED' | 'LIVE' | 'EXTENDED' | 'SETTLED' | 'CANCELLED' | 'FAILED' | (string & {});
+type ApiSchema<Name extends keyof components['schemas']> = components['schemas'][Name];
+type Normalized<Name extends keyof components['schemas'], Fields extends object> = Omit<ApiSchema<Name>, keyof Fields> & Fields;
 
-export type DeliveryAddressSnapshot = {
+type AuctionState = ApiSchema<'AuctionState'> | (string & {});
+
+export type DeliveryAddressSnapshot = Normalized<'AuctionDeliveryAddressSnapshot', {
   addressId?: string;
   receiverName?: string;
   receiver?: string;
@@ -14,9 +18,9 @@ export type DeliveryAddressSnapshot = {
   street?: string;
   detail?: string;
   fullAddress?: string;
-};
+}>;
 
-export type OrderSummary = {
+export type OrderSummary = Normalized<'AuctionOrderSummary', {
   id: string;
   lotId: string;
   roomId: string;
@@ -37,20 +41,14 @@ export type OrderSummary = {
   expiresAtUnixMs: number | string;
   paidAtUnixMs?: number | string;
   version?: number | string;
-};
+}>;
 
-export type LotResultReply = {
+export type LotResultReply = Normalized<'GetLotResultReply', {
   result?: ReplyResult;
   lot?: Lot;
   auctionState?: AuctionState;
   order?: OrderSummary;
-};
-
-export type OrderRecord = {
-  lot: Lot;
-  auctionState: AuctionState;
-  order: OrderSummary | null;
-};
+}>;
 
 export type OrderPage = {
   orders: OrderSummary[];

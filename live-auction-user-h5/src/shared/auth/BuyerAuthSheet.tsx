@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { FormEvent } from 'react';
+import type { FormEvent, MouseEvent } from 'react';
 import { normalizeBuyerUsername, validateBuyerCredentials } from './credentialRules';
 import { useAuthSession } from './useAuthSession';
 
@@ -10,9 +10,10 @@ type BuyerAuthSheetProps = {
   description: string;
   actionLabel: string;
   onAuthenticated?: () => void;
+  onClose?: () => void;
 };
 
-export function BuyerAuthSheet({ title, description, actionLabel, onAuthenticated }: BuyerAuthSheetProps) {
+export function BuyerAuthSheet({ title, description, actionLabel, onAuthenticated, onClose }: BuyerAuthSheetProps) {
   const { loginBuyer, registerBuyer, resetBuyerPassword, reason } = useAuthSession();
   const [authMode, setAuthMode] = useState<AuthMode>('login');
   const [authUsername, setAuthUsername] = useState('');
@@ -56,8 +57,12 @@ export function BuyerAuthSheet({ title, description, actionLabel, onAuthenticate
     }
   };
 
+  const closeFromMask = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.currentTarget === event.target) onClose?.();
+  };
+
   return (
-    <div className="dyMallOrderAuthMask" role="presentation">
+    <div className="dyMallOrderAuthMask" role="presentation" onClick={closeFromMask}>
       <section className="dyMallOrderAuthSheet" aria-modal="true" role="dialog" aria-label={title}>
         <h2>{title}</h2>
         <p>{description}</p>

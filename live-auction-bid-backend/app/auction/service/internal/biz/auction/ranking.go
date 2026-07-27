@@ -31,13 +31,16 @@ func LimitRanking(ranking []*v1.RankingItem, limit int64) []*v1.RankingItem {
 	return ranking[:limit]
 }
 
-func BuildRealtimeRanking(bids []v1.Bid) []*v1.RankingItem {
+func BuildRealtimeRanking(bids []*v1.Bid) []*v1.RankingItem {
 	return LimitRanking(BuildRanking(bids), RealtimeRankingLimit())
 }
 
-func BuildRanking(bids []v1.Bid) []*v1.RankingItem {
+func BuildRanking(bids []*v1.Bid) []*v1.RankingItem {
 	bestByUser := make(map[string]*v1.RankingItem)
 	for _, bid := range bids {
+		if bid == nil {
+			continue
+		}
 		current, ok := bestByUser[bid.UserId]
 		if !ok || bid.GetAmount().GetAmount() > current.GetAmount().GetAmount() ||
 			bid.GetAmount().GetAmount() == current.GetAmount().GetAmount() && bid.CreatedAtUnixMs < current.BidAtUnixMs {
@@ -69,7 +72,10 @@ func BuildRanking(bids []v1.Bid) []*v1.RankingItem {
 	return items
 }
 
-func avatarURLForBid(bid v1.Bid) string {
+func avatarURLForBid(bid *v1.Bid) string {
+	if bid == nil {
+		return ""
+	}
 	if trimmed := strings.TrimSpace(bid.GetAvatarUrl()); trimmed != "" {
 		return trimmed
 	}

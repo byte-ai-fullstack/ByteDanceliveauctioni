@@ -1,0 +1,209 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: index-es}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app.kubernetes.io/name: index-es}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: index-es
+        app.kubernetes.io/tier: search-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18088"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: index-es}}
+      containers:
+        - name: index-es
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-index-es"]
+          ports: [{name: operations, containerPort: 18088}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_INSTANCE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - name: AUCTION_ES_URL
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: elasticsearch-url}}
+            - name: AUCTION_ES_USERNAME
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: elasticsearch-username}}
+            - name: AUCTION_ES_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: elasticsearch-password}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-index-es, defaultMode: 0400}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: index-pgvector}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app.kubernetes.io/name: index-pgvector}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: index-pgvector
+        app.kubernetes.io/tier: search-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18089"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: index-pgvector}}
+      containers:
+        - name: index-pgvector
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-index-pgvector"]
+          ports: [{name: operations, containerPort: 18089}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_INSTANCE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: AUCTION_SEARCH_PG_DSN
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: pgvector-dsn}}
+            - name: AUCTION_EMBEDDING_API_KEY
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: embedding-api-key}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-index-pgvector, defaultMode: 0400}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: search-reconciler}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: search-reconciler}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: search-reconciler
+        app.kubernetes.io/tier: search-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18090"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: search-reconciler
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-search-reconciler"]
+          ports: [{name: operations, containerPort: 18090}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - name: AUCTION_ES_URL
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: elasticsearch-url}}
+            - name: AUCTION_ES_USERNAME
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: elasticsearch-username}}
+            - name: AUCTION_ES_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: elasticsearch-password}}
+            - name: AUCTION_SEARCH_PG_DSN
+              valueFrom: {secretKeyRef: {name: auction-search-credentials, key: pgvector-dsn}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-search-reconciler, defaultMode: 0400}

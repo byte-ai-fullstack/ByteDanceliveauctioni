@@ -1,5 +1,0 @@
-- targets:
-    - live-auction-shard-gateway:18081
-  labels:
-    role: shard-gateway
-    shard: gateway

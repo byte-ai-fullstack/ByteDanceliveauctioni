@@ -3,10 +3,11 @@ package data
 import (
 	"context"
 	"errors"
-	"strconv"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/protobuf/encoding/protojson"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,9 +17,8 @@ import (
 )
 
 const missingLotCreatedAtFallback = 24 * time.Hour
-const stalePreStartLotWindow = 24 * time.Hour
 
-func (s *Store) Create(ctx context.Context, lot *v1.Lot, ownerUserID string, events []v1.AuctionEvent) error {
+func (s *Store) Create(ctx context.Context, lot *v1.Lot, ownerUserID string, events []*v1.AuctionEvent) error {
 	if lot == nil {
 		return errors.New("lot is required")
 	}
@@ -26,7 +26,7 @@ func (s *Store) Create(ctx context.Context, lot *v1.Lot, ownerUserID string, eve
 	if err != nil {
 		return err
 	}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(model).Error; err != nil {
 			return err
 		}
@@ -43,11 +43,11 @@ func (s *Store) Create(ctx context.Context, lot *v1.Lot, ownerUserID string, eve
 		if err := attachAssetFilesByURL(tx, ownerUserID, lot.Id, lotAssetURLs(lot)); err != nil {
 			return err
 		}
+		if err := appendPreStartLotStateOutbox(ctx, tx, lot, lot.UpdatedAtUnixMs); err != nil {
+			return err
+		}
 		return createEventModels(ctx, tx, events)
-	}); err != nil {
-		return err
-	}
-	return s.streamEvents(ctx, events)
+	})
 }
 
 func lotAssetURLs(lot *v1.Lot) []string {
@@ -64,21 +64,15 @@ func lotAssetURLs(lot *v1.Lot) []string {
 	return urls
 }
 
-func (s *Store) Save(ctx context.Context, lot *v1.Lot, expectedVersion int64, events []v1.AuctionEvent) error {
-	if lot == nil {
-		return errors.New("lot is required")
-	}
-	if expectedVersion <= 0 {
-		return errors.New("lot expected version is required")
+func (s *Store) Save(ctx context.Context, lot *v1.Lot, expectedVersion int64, events []*v1.AuctionEvent) error {
+	if err := validatePreStartLotSaveRequest(lot, expectedVersion); err != nil {
+		return err
 	}
 	model, err := lotToModel(lot)
 	if err != nil {
 		return err
 	}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := lockRoomStateForTerminalLot(ctx, tx, lot); err != nil {
-			return err
-		}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var current AuctionLotModel
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ?", lot.Id).
@@ -91,27 +85,117 @@ func (s *Store) Save(ctx context.Context, lot *v1.Lot, expectedVersion int64, ev
 		if current.Version != expectedVersion {
 			return apperr.ErrLotVersionConflict
 		}
+		if err := s.ensureRuntimeStateAbsentForPreStartUpdate(ctx, lot.GetId()); err != nil {
+			return err
+		}
+		if err := validatePreStartLotUpdate(&current, model, expectedVersion); err != nil {
+			return err
+		}
 		result := tx.
 			Model(&AuctionLotModel{}).
 			Where("id = ? AND version = ?", lot.Id, expectedVersion).
-			Select("*").
-			Omit("created_at").
-			Updates(model)
+			Updates(preStartLotUpdateColumns(model))
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
 			return apperr.ErrLotVersionConflict
 		}
-		if err := releaseActiveLotIfTerminal(ctx, tx, lot); err != nil {
+		if err := tx.Model(&AuctionLotStatsModel{}).
+			Where("lot_id = ?", lot.GetId()).
+			Updates(map[string]any{"main_account_id": lot.GetMainAccountId(), "room_id": lot.GetRoomId()}).Error; err != nil {
 			return err
 		}
 		lot.UpdatedAtUnixMs = time.Now().UnixMilli()
+		if err := appendPreStartLotStateOutbox(ctx, tx, lot, lot.UpdatedAtUnixMs); err != nil {
+			return err
+		}
 		return createEventModels(ctx, tx, events)
-	}); err != nil {
-		return err
+	})
+}
+
+func (s *Store) ensureRuntimeStateAbsentForPreStartUpdate(ctx context.Context, lotID string) error {
+	if s == nil || s.redis == nil {
+		return errors.New("pre-start save requires Redis runtime verification")
 	}
-	return s.streamEvents(ctx, events)
+	if s.runtimeGenerationGuard != nil {
+		if _, err := s.runtimeGenerationGuard.AllowWrite(); err != nil {
+			return fmt.Errorf("%w: Redis runtime generation is not verified: %v", apperr.ErrRuntimeProjectionGap, err)
+		}
+	}
+	exists, err := s.redis.Exists(ctx, runtimeStateKey(lotID)).Result()
+	if err != nil {
+		return fmt.Errorf("verify pre-start runtime absence: %w", err)
+	}
+	if exists != 0 {
+		return fmt.Errorf("%w: lot has already entered the Redis runtime lifecycle", apperr.ErrInvalidArgument)
+	}
+	return nil
+}
+
+func validatePreStartLotSaveRequest(lot *v1.Lot, expectedVersion int64) error {
+	if lot == nil {
+		return errors.New("lot is required")
+	}
+	if expectedVersion <= 0 {
+		return errors.New("lot expected version is required")
+	}
+	if !auction.IsPreStartCancellableStatus(lot.GetStatus()) {
+		return fmt.Errorf("%w: generic lot save only supports pre-start configuration", apperr.ErrInvalidArgument)
+	}
+	if lot.GetQueueStatus() != v1.LotQueueStatus_LOT_QUEUE_STATUS_NONE && lot.GetQueueStatus() != v1.LotQueueStatus_LOT_QUEUE_STATUS_UNSPECIFIED {
+		return fmt.Errorf("%w: queued lot must be removed from the queue before editing", apperr.ErrInvalidArgument)
+	}
+	if lot.GetVersion() != expectedVersion+1 {
+		return fmt.Errorf("%w: pre-start save must advance lot version exactly once", apperr.ErrInvalidArgument)
+	}
+	return nil
+}
+
+func validatePreStartLotUpdate(current, next *AuctionLotModel, expectedVersion int64) error {
+	if current == nil || next == nil {
+		return fmt.Errorf("%w: current and next lot models are required", apperr.ErrInvalidArgument)
+	}
+	if current.Version != expectedVersion {
+		return apperr.ErrLotVersionConflict
+	}
+	if !auction.IsPreStartCancellableStatus(v1.LotStatus(current.Status)) || current.Status != next.Status {
+		return fmt.Errorf("%w: lot lifecycle state is not writable through generic save", apperr.ErrInvalidArgument)
+	}
+	if current.QueueStatus != next.QueueStatus || current.QueuePosition != next.QueuePosition {
+		return fmt.Errorf("%w: lot queue state is not writable through generic save", apperr.ErrInvalidArgument)
+	}
+	if current.ID != next.ID || current.MainAccountID != next.MainAccountID {
+		return fmt.Errorf("%w: lot identity is immutable", apperr.ErrInvalidArgument)
+	}
+	if next.Version != expectedVersion+1 {
+		return fmt.Errorf("%w: pre-start save must advance lot version exactly once", apperr.ErrInvalidArgument)
+	}
+	if next.ConfigVersion != current.ConfigVersion+1 {
+		return fmt.Errorf("%w: pre-start save must advance config version exactly once", apperr.ErrInvalidArgument)
+	}
+	return nil
+}
+
+func preStartLotUpdateColumns(model *AuctionLotModel) map[string]any {
+	return map[string]any{
+		"room_id":                   model.RoomID,
+		"title":                     model.Title,
+		"description":               model.Description,
+		"image_url":                 model.ImageURL,
+		"currency":                  model.Currency,
+		"start_price_amount":        model.StartPriceAmount,
+		"min_increment_amount":      model.MinIncrementAmount,
+		"cap_price_amount":          model.CapPriceAmount,
+		"duration_seconds":          model.DurationSeconds,
+		"anti_snipe_window_seconds": model.AntiSnipeWindowSeconds,
+		"anti_snipe_extend_seconds": model.AntiSnipeExtendSeconds,
+		"max_extend_count":          model.MaxExtendCount,
+		"current_price_amount":      model.CurrentPriceAmount,
+		"version":                   model.Version,
+		"config_version":            model.ConfigVersion,
+		"payload":                   model.Payload,
+	}
 }
 
 func (s *Store) AttachAssets(ctx context.Context, ownerUserID string, lot *v1.Lot) error {
@@ -129,6 +213,91 @@ func (s *Store) FindByID(ctx context.Context, lotID string) (*v1.Lot, error) {
 
 func (s *Store) FindCoreByID(ctx context.Context, lotID string) (*v1.Lot, error) {
 	return s.findByID(ctx, lotID, false)
+}
+
+// FindByIDs hydrates search candidates from MySQL in one query, attaches stats
+// in one query, then overlays all available Redis runtime states in one pipeline.
+func (s *Store) FindByIDs(ctx context.Context, lotIDs []string) ([]*v1.Lot, error) {
+	if len(lotIDs) == 0 {
+		return nil, nil
+	}
+	if len(lotIDs) > 100 {
+		return nil, errors.New("at most 100 lot ids are allowed")
+	}
+	var models []AuctionLotModel
+	if err := s.db.WithContext(ctx).Where("id IN ?", lotIDs).Find(&models).Error; err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*v1.Lot, len(models))
+	for i := range models {
+		lot, err := modelToLot(&models[i])
+		if err != nil {
+			return nil, err
+		}
+		byID[lot.GetId()] = lot
+	}
+	lots := make([]*v1.Lot, 0, len(models))
+	for _, lotID := range lotIDs {
+		if lot := byID[lotID]; lot != nil {
+			lots = append(lots, lot)
+		}
+	}
+	if err := s.attachStats(ctx, lots); err != nil {
+		return nil, err
+	}
+	if s.redis == nil || len(lots) == 0 {
+		if err := s.attachLotPresentations(ctx, lots); err != nil {
+			return nil, err
+		}
+		return lots, nil
+	}
+	pipe := s.redis.Pipeline()
+	commands := make([]*redis.MapStringStringCmd, len(lots))
+	for index, lot := range lots {
+		commands[index] = pipe.HGetAll(ctx, runtimeStateKey(lot.GetId()))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("read batch lot runtime states: %w", err)
+	}
+	for index, command := range commands {
+		values, err := command.Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return nil, fmt.Errorf("read lot %s runtime state: %w", lots[index].GetId(), err)
+		}
+		if len(values) == 0 {
+			if lots[index].GetStatus() == v1.LotStatus_LOT_STATUS_LIVE || lots[index].GetStatus() == v1.LotStatus_LOT_STATUS_EXTENDED {
+				return nil, fmt.Errorf("live lot %s runtime state is missing", lots[index].GetId())
+			}
+			continue
+		}
+		overlay, err := authoritativeRuntimeLot(lots[index], values)
+		if err != nil {
+			return nil, err
+		}
+		lots[index] = overlay
+	}
+	if err := s.attachLotPresentations(ctx, lots); err != nil {
+		return nil, err
+	}
+	return lots, nil
+}
+
+func authoritativeRuntimeLot(base *v1.Lot, values map[string]string) (*v1.Lot, error) {
+	if base == nil || len(values) == 0 {
+		return nil, errors.New("base lot and runtime values are required")
+	}
+	if values["lot_id"] != base.GetId() || values["room_id"] != base.GetRoomId() || values["main_account_id"] != base.GetMainAccountId() ||
+		strings.TrimSpace(values["version"]) == "" || strings.TrimSpace(values["status"]) == "" {
+		return nil, fmt.Errorf("lot %s runtime identity or state is incomplete", base.GetId())
+	}
+	overlay := runtimeStateToLot(base, values)
+	if overlay.GetId() != base.GetId() || overlay.GetRoomId() != base.GetRoomId() || overlay.GetMainAccountId() != base.GetMainAccountId() {
+		return nil, fmt.Errorf("lot %s runtime identity is inconsistent", base.GetId())
+	}
+	if overlay.GetVersion() < base.GetVersion() {
+		return nil, fmt.Errorf("lot %s runtime version %d is behind MySQL version %d", base.GetId(), overlay.GetVersion(), base.GetVersion())
+	}
+	return overlay, nil
 }
 
 func (s *Store) findByID(ctx context.Context, lotID string, includeStats bool) (*v1.Lot, error) {
@@ -150,6 +319,9 @@ func (s *Store) findByID(ctx context.Context, lotID string, includeStats bool) (
 		return lot, nil
 	}
 	if err := s.attachStats(ctx, []*v1.Lot{lot}); err != nil {
+		return nil, err
+	}
+	if err := s.attachLotPresentations(ctx, []*v1.Lot{lot}); err != nil {
 		return nil, err
 	}
 	return lot, nil
@@ -185,6 +357,9 @@ func (s *Store) List(ctx context.Context, roomID string, status v1.LotStatus) ([
 		lots = append(lots, lot)
 	}
 	if err := s.attachStats(ctx, lots); err != nil {
+		return nil, err
+	}
+	if err := s.attachLotPresentations(ctx, lots); err != nil {
 		return nil, err
 	}
 	return lots, nil
@@ -236,6 +411,9 @@ func (s *Store) ListLots(ctx context.Context, query auction.LotQuery) (auction.L
 		lots = append(lots, lot)
 	}
 	if err := s.attachStats(ctx, lots); err != nil {
+		return auction.LotList{}, err
+	}
+	if err := s.attachLotPresentations(ctx, lots); err != nil {
 		return auction.LotList{}, err
 	}
 	return auction.LotList{Lots: lots, Total: total, Page: query.Page, PageSize: query.PageSize}, nil
@@ -304,116 +482,11 @@ func lotStatusesForView(view string) []int32 {
 	}
 }
 
-func (s *Store) ListExpiredOpen(ctx context.Context, nowMs int64, limit int) ([]*v1.Lot, error) {
-	if nowMs <= 0 {
-		return nil, errors.New("now ms is required")
-	}
-	if limit <= 0 {
-		limit = 100
-	}
-	var models []AuctionLotModel
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status IN ? AND ends_at_unix_ms > 0 AND ends_at_unix_ms <= ?", []int32{int32(v1.LotStatus_LOT_STATUS_LIVE), int32(v1.LotStatus_LOT_STATUS_EXTENDED)}, nowMs).
-			Order("ends_at_unix_ms ASC").
-			Order("id ASC").
-			Limit(limit).
-			Find(&models).Error
-	}); err != nil {
-		return nil, err
-	}
-	lots := make([]*v1.Lot, 0, len(models))
-	for i := range models {
-		lot, err := modelToLot(&models[i])
-		if err != nil {
-			return nil, err
-		}
-		lots = append(lots, lot)
-	}
-	if err := s.attachStats(ctx, lots); err != nil {
-		return nil, err
-	}
-	return lots, nil
-}
-
-func (s *Store) ListStalePreStart(ctx context.Context, nowMs, localDayStartMs int64, limit int) ([]*v1.Lot, error) {
-	if nowMs <= 0 {
-		return nil, errors.New("now ms is required")
-	}
-	if localDayStartMs <= 0 {
-		return nil, errors.New("local day start ms is required")
-	}
-	if limit <= 0 {
-		limit = 100
-	}
-	cutoff24h := time.UnixMilli(nowMs).Add(-stalePreStartLotWindow)
-	localDayStart := time.UnixMilli(localDayStartMs)
-	var models []AuctionLotModel
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status = ? AND started_at_unix_ms = 0 AND queue_status <> ? AND queue_position = 0 AND (created_at <= ? OR created_at < ?)",
-				int32(v1.LotStatus_LOT_STATUS_READY),
-				int32(v1.LotQueueStatus_LOT_QUEUE_STATUS_QUEUED),
-				cutoff24h,
-				localDayStart,
-			).
-			Order("created_at ASC").
-			Order("id ASC").
-			Limit(limit).
-			Find(&models).Error
-	}); err != nil {
-		return nil, err
-	}
-	lots := make([]*v1.Lot, 0, len(models))
-	for i := range models {
-		lot, err := modelToLot(&models[i])
-		if err != nil {
-			return nil, err
-		}
-		runtimeOpen, err := s.runtimeLotIsOpen(ctx, lot.GetId())
-		if err != nil {
-			return nil, err
-		}
-		if runtimeOpen {
-			continue
-		}
-		lots = append(lots, lot)
-	}
-	if err := s.attachStats(ctx, lots); err != nil {
-		return nil, err
-	}
-	return lots, nil
-}
-
-func (s *Store) runtimeLotIsOpen(ctx context.Context, lotID string) (bool, error) {
-	if lotID == "" || s.redis == nil {
-		return false, nil
-	}
-	values, err := s.redis.HMGet(ctx, runtimeStateKey(lotID), "lot_id", "status").Result()
-	if err != nil {
-		return false, err
-	}
-	if len(values) < 2 {
-		return false, nil
-	}
-	storedLotID, ok := values[0].(string)
-	if !ok || storedLotID != lotID {
-		return false, nil
-	}
-	statusText, ok := values[1].(string)
-	if !ok || statusText == "" {
-		return false, nil
-	}
-	statusValue, err := strconv.ParseInt(statusText, 10, 32)
-	if err != nil {
-		return false, err
-	}
-	return auction.IsAuctionOpenStatus(v1.LotStatus(statusValue)), nil
-}
-
 func lotToModel(lot *v1.Lot) (*AuctionLotModel, error) {
+	if lot.ConfigVersion <= 0 {
+		lot.ConfigVersion = 1
+	}
 	var capAmount *int64
-	var capCurrency string
 	rule := lot.GetRule()
 	if rule == nil {
 		rule = &v1.BidRule{}
@@ -438,7 +511,10 @@ func lotToModel(lot *v1.Lot) (*AuctionLotModel, error) {
 	if rule.GetCapPrice() != nil {
 		amount := rule.GetCapPrice().GetAmount()
 		capAmount = &amount
-		capCurrency = rule.GetCapPrice().GetCurrency()
+	}
+	currency, err := unifiedLotCurrency(startPrice, minIncrement, rule.GetCapPrice(), currentPrice, finalPrice)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", apperr.ErrInvalidArgument, err)
 	}
 	payload, err := protojson.Marshal(lot)
 	if err != nil {
@@ -454,18 +530,15 @@ func lotToModel(lot *v1.Lot) (*AuctionLotModel, error) {
 		Status:                 int32(lot.Status),
 		QueueStatus:            int32(normalizeQueueStatus(lot.GetQueueStatus())),
 		QueuePosition:          lot.GetQueuePosition(),
+		Currency:               currency,
 		StartPriceAmount:       startPrice.GetAmount(),
-		StartPriceCurrency:     startPrice.GetCurrency(),
 		MinIncrementAmount:     minIncrement.GetAmount(),
-		MinIncrementCurrency:   minIncrement.GetCurrency(),
 		CapPriceAmount:         capAmount,
-		CapPriceCurrency:       capCurrency,
 		DurationSeconds:        rule.GetDurationSeconds(),
 		AntiSnipeWindowSeconds: rule.GetAntiSnipeWindowSeconds(),
 		AntiSnipeExtendSeconds: rule.GetAntiSnipeExtendSeconds(),
 		MaxExtendCount:         rule.GetMaxExtendCount(),
 		CurrentPriceAmount:     currentPrice.GetAmount(),
-		CurrentPriceCurrency:   currentPrice.GetCurrency(),
 		LeadingUserID:          lot.LeadingUserId,
 		LeadingNickname:        lot.LeadingNickname,
 		StartedAtUnixMs:        lot.StartedAtUnixMs,
@@ -476,11 +549,32 @@ func lotToModel(lot *v1.Lot) (*AuctionLotModel, error) {
 		WinnerUserID:           lot.WinnerUserId,
 		WinnerNickname:         lot.WinnerNickname,
 		FinalPriceAmount:       finalPrice.GetAmount(),
-		FinalPriceCurrency:     finalPrice.GetCurrency(),
 		Version:                lot.Version,
+		ConfigVersion:          lot.ConfigVersion,
 		PlaybookStage:          int32(lot.PlaybookStage),
 		Payload:                string(payload),
 	}, nil
+}
+
+func unifiedLotCurrency(values ...*v1.Money) (string, error) {
+	currency := ""
+	for _, value := range values {
+		if value == nil || strings.TrimSpace(value.GetCurrency()) == "" {
+			continue
+		}
+		candidate := strings.TrimSpace(value.GetCurrency())
+		if len(candidate) != 3 || strings.ToUpper(candidate) != candidate {
+			return "", errors.New("lot currency must be three uppercase letters")
+		}
+		if currency != "" && candidate != currency {
+			return "", errors.New("all lot monetary fields must use one currency")
+		}
+		currency = candidate
+	}
+	if currency == "" {
+		currency = "CNY"
+	}
+	return currency, nil
 }
 
 func normalizeQueueStatus(status v1.LotQueueStatus) v1.LotQueueStatus {
@@ -512,8 +606,8 @@ func modelToLot(model *AuctionLotModel) (*v1.Lot, error) {
 	if lot.Rule == nil {
 		lot.Rule = &v1.BidRule{}
 	}
-	lot.Rule.StartPrice = &v1.Money{Amount: model.StartPriceAmount, Currency: model.StartPriceCurrency}
-	lot.Rule.MinIncrement = &v1.Money{Amount: model.MinIncrementAmount, Currency: model.MinIncrementCurrency}
+	lot.Rule.StartPrice = &v1.Money{Amount: model.StartPriceAmount, Currency: model.Currency}
+	lot.Rule.MinIncrement = &v1.Money{Amount: model.MinIncrementAmount, Currency: model.Currency}
 	lot.Rule.DurationSeconds = model.DurationSeconds
 	lot.Rule.AntiSnipeWindowSeconds = model.AntiSnipeWindowSeconds
 	lot.Rule.AntiSnipeExtendSeconds = model.AntiSnipeExtendSeconds
@@ -523,7 +617,7 @@ func modelToLot(model *AuctionLotModel) (*v1.Lot, error) {
 	}
 	lot.QueueStatus = normalizeQueueStatus(v1.LotQueueStatus(model.QueueStatus))
 	lot.QueuePosition = model.QueuePosition
-	lot.CurrentPrice = &v1.Money{Amount: model.CurrentPriceAmount, Currency: model.CurrentPriceCurrency}
+	lot.CurrentPrice = &v1.Money{Amount: model.CurrentPriceAmount, Currency: model.Currency}
 	lot.LeadingUserId = model.LeadingUserID
 	lot.LeadingNickname = model.LeadingNickname
 	lot.StartedAtUnixMs = model.StartedAtUnixMs
@@ -533,13 +627,17 @@ func modelToLot(model *AuctionLotModel) (*v1.Lot, error) {
 	lot.CancelledAtUnixMs = model.CancelledAtUnixMs
 	lot.WinnerUserId = model.WinnerUserID
 	lot.WinnerNickname = model.WinnerNickname
-	lot.FinalPrice = &v1.Money{Amount: model.FinalPriceAmount, Currency: model.FinalPriceCurrency}
+	lot.FinalPrice = &v1.Money{Amount: model.FinalPriceAmount, Currency: model.Currency}
 	lot.Version = model.Version
+	lot.ConfigVersion = model.ConfigVersion
+	if lot.ConfigVersion <= 0 {
+		lot.ConfigVersion = 1
+	}
 	lot.PlaybookStage = v1.PlaybookStage(model.PlaybookStage)
 	lot.CreatedAtUnixMs = modelTimeUnixMsOr(model.CreatedAt, time.Now().Add(-missingLotCreatedAtFallback).UnixMilli())
 	lot.UpdatedAtUnixMs = modelTimeUnixMsOr(model.UpdatedAt, lot.CreatedAtUnixMs)
 	if model.CapPriceAmount != nil {
-		lot.Rule.CapPrice = &v1.Money{Amount: *model.CapPriceAmount, Currency: model.CapPriceCurrency}
+		lot.Rule.CapPrice = &v1.Money{Amount: *model.CapPriceAmount, Currency: model.Currency}
 	} else {
 		lot.Rule.CapPrice = nil
 	}

@@ -1,15 +1,46 @@
+x-kafka-client-env: &kafka-client-env
+  AUCTION_KAFKA_CLIENT_PROPERTIES_FILE: "${AUCTION_KAFKA_CLIENT_PROPERTIES_FILE:-}"
+  AUCTION_KAFKA_BROKERS: "${AUCTION_KAFKA_BROKERS:?AUCTION_KAFKA_BROKERS is required}"
+  AUCTION_KAFKA_SECURITY_PROTOCOL: "${AUCTION_KAFKA_SECURITY_PROTOCOL:?AUCTION_KAFKA_SECURITY_PROTOCOL is required}"
+  AUCTION_KAFKA_SASL_MECHANISM: "${AUCTION_KAFKA_SASL_MECHANISM:-}"
+  AUCTION_KAFKA_SASL_USERNAME: "${AUCTION_KAFKA_SASL_USERNAME:-}"
+  AUCTION_KAFKA_SASL_PASSWORD: "${AUCTION_KAFKA_SASL_PASSWORD:-}"
+  AUCTION_KAFKA_TLS_CA_FILE: "${AUCTION_KAFKA_TLS_CA_FILE:-}"
+  AUCTION_KAFKA_TLS_SERVER_NAME: "${AUCTION_KAFKA_TLS_SERVER_NAME:-}"
+
 services:
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: deploy/Dockerfile
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    entrypoint: ["/app/auction-migrate"]
+    command: ["up"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - live-auction
+
   auction-backend:
     build:
       context: ./backend
       dockerfile: deploy/Dockerfile
-    image: live-auction-bid-backend:prod
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    entrypoint: ["/app/auction-gateway"]
     container_name: live-auction-bid-backend
     restart: unless-stopped
     env_file:
-      - ./.env
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
     environment:
       AUCTION_HTTP_ADDR: ":18080"
+      AUCTION_COMMAND_GRPC_TARGET: "dns:///auction-service:19090"
+      AUCTION_COMMAND_GRPC_TIMEOUT: "${AUCTION_COMMAND_GRPC_TIMEOUT:-3s}"
       AUCTION_ENV: "${AUCTION_ENV:-prod}"
       AUCTION_WS_ALLOWED_ORIGINS: "${AUCTION_WS_ALLOWED_ORIGINS:?AUCTION_WS_ALLOWED_ORIGINS is required}"
       AUCTION_WS_ALLOW_MISSING_ORIGIN: "${AUCTION_WS_ALLOW_MISSING_ORIGIN:-false}"
@@ -19,15 +50,21 @@ services:
       AUCTION_REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
       AUCTION_SEARCH_PROVIDER: "${AUCTION_SEARCH_PROVIDER:-}"
       AUCTION_SEARCH_PG_DSN: "${AUCTION_SEARCH_PG_DSN:-}"
-      AUCTION_SEARCH_SYNC_INTERVAL: "${AUCTION_SEARCH_SYNC_INTERVAL:-5m}"
-      AUCTION_SEARCH_SYNC_BATCH_LIMIT: "${AUCTION_SEARCH_SYNC_BATCH_LIMIT:-500}"
-      AUCTION_SEARCH_HIDDEN_RETENTION: "${AUCTION_SEARCH_HIDDEN_RETENTION:-168h}"
+      AUCTION_SEARCH_ES_URL: "${AUCTION_SEARCH_ES_URL:-}"
+      AUCTION_SEARCH_ES_USERNAME: "${AUCTION_SEARCH_ES_USERNAME:-}"
+      AUCTION_SEARCH_ES_PASSWORD: "${AUCTION_SEARCH_ES_PASSWORD:-}"
+      AUCTION_SEARCH_ES_ALIAS: "${AUCTION_SEARCH_ES_ALIAS:-auction-lots-current}"
+      AUCTION_SEARCH_ES_TIMEOUT: "${AUCTION_SEARCH_ES_TIMEOUT:-3s}"
+      AUCTION_SEARCH_ES_MAX_RESPONSE_BYTES: "${AUCTION_SEARCH_ES_MAX_RESPONSE_BYTES:-1048576}"
+      AUCTION_SEARCH_QUERY_TIMEOUT: "${AUCTION_SEARCH_QUERY_TIMEOUT:-5s}"
       AUCTION_EMBEDDING_PROVIDER: "${AUCTION_EMBEDDING_PROVIDER:-dashscope}"
       AUCTION_EMBEDDING_BASE_URL: "${AUCTION_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
       AUCTION_EMBEDDING_MODEL: "${AUCTION_EMBEDDING_MODEL:-text-embedding-v4}"
+      AUCTION_EMBEDDING_MODEL_VERSION: "${AUCTION_EMBEDDING_MODEL_VERSION:-text-embedding-v4}"
       AUCTION_EMBEDDING_DIMENSIONS: "${AUCTION_EMBEDDING_DIMENSIONS:-1024}"
       AUCTION_EMBEDDING_BATCH_SIZE: "${AUCTION_EMBEDDING_BATCH_SIZE:-10}"
       AUCTION_EMBEDDING_TIMEOUT: "${AUCTION_EMBEDDING_TIMEOUT:-8s}"
+      AUCTION_EMBEDDING_COST_PER_MILLION_TOKENS: "${AUCTION_EMBEDDING_COST_PER_MILLION_TOKENS:-0}"
       AUCTION_EMBEDDING_API_KEY: "${AUCTION_EMBEDDING_API_KEY:-}"
       AUCTION_AI_PROVIDER: "${AUCTION_AI_PROVIDER:-mock}"
       AUCTION_AI_BASE_URL: "${AUCTION_AI_BASE_URL:-}"
@@ -36,23 +73,16 @@ services:
       AUCTION_AI_MOCK_ON_FAILURE: "${AUCTION_AI_MOCK_ON_FAILURE:-true}"
       AUCTION_AI_API_KEY: "${AUCTION_AI_API_KEY:-}"
       AUCTION_PAYMENT_PROVIDER: "${AUCTION_PAYMENT_PROVIDER:?AUCTION_PAYMENT_PROVIDER is required}"
-      AUCTION_CONSUL_ADDR: "consul:8500"
-      AUCTION_SERVICE_NAME: "auction-backend"
-      AUCTION_SERVICE_ADDR: "auction-backend"
       AUCTION_JWT_SECRET: "${AUCTION_JWT_SECRET:?AUCTION_JWT_SECRET is required}"
       AUCTION_JWT_ISSUER: "auction-backend"
       AUCTION_BOOTSTRAP_MAIN_ACCOUNT_USERNAME: "${AUCTION_BOOTSTRAP_MAIN_ACCOUNT_USERNAME:-main}"
       AUCTION_BOOTSTRAP_MAIN_ACCOUNT_PASSWORD: "${AUCTION_BOOTSTRAP_MAIN_ACCOUNT_PASSWORD:?AUCTION_BOOTSTRAP_MAIN_ACCOUNT_PASSWORD is required}"
       AUCTION_BOOTSTRAP_MAIN_ACCOUNT_NICKNAME: "${AUCTION_BOOTSTRAP_MAIN_ACCOUNT_NICKNAME:-主账号}"
-      AUCTION_BID_SYNC_PROJECTION: "${AUCTION_BID_SYNC_PROJECTION:-false}"
-      AUCTION_BID_DB_GUARD_MODE: "${AUCTION_BID_DB_GUARD_MODE:-runtime-first}"
       AUCTION_VERBOSE_BID_LOG: "${AUCTION_VERBOSE_BID_LOG:-false}"
-      AUCTION_RUNTIME_PROJECTION_SHARDS: "${AUCTION_RUNTIME_PROJECTION_SHARDS:-16}"
-      AUCTION_RUNTIME_PROJECTION_BATCH_LIMIT: "${AUCTION_RUNTIME_PROJECTION_BATCH_LIMIT:-300}"
-      AUCTION_RUNTIME_PROJECTION_DRAIN_BATCHES: "${AUCTION_RUNTIME_PROJECTION_DRAIN_BATCHES:-20}"
-      AUCTION_RUNTIME_PROJECTION_BACKPRESSURE_PENDING_LIMIT: "${AUCTION_RUNTIME_PROJECTION_BACKPRESSURE_PENDING_LIMIT:-3000}"
-      AUCTION_RUNTIME_PROJECTION_BACKPRESSURE_LAG: "${AUCTION_RUNTIME_PROJECTION_BACKPRESSURE_LAG:-5s}"
-      AUCTION_RUNTIME_PROJECT_LEGACY_STREAMS: "${AUCTION_RUNTIME_PROJECT_LEGACY_STREAMS:-false}"
+      AUCTION_NATS_URLS: "${AUCTION_GATEWAY_NATS_URLS:-${AUCTION_NATS_URLS:?AUCTION_NATS_URLS is required}}"
+      AUCTION_NATS_CLIENT_NAME: "${AUCTION_NATS_CLIENT_NAME:-live-auction-prod-gateway}"
+      AUCTION_OUTBOX_SHARDS: "16"
+      AUCTION_OUTBOX_PENDING_LIMIT: "${AUCTION_OUTBOX_PENDING_LIMIT:-3000}"
       AUCTION_DB_MAX_OPEN_CONNS: "${AUCTION_DB_MAX_OPEN_CONNS:-30}"
       AUCTION_DB_MAX_IDLE_CONNS: "${AUCTION_DB_MAX_IDLE_CONNS:-15}"
       AUCTION_DB_CONN_MAX_LIFETIME: "${AUCTION_DB_CONN_MAX_LIFETIME:-30m}"
@@ -62,11 +92,13 @@ services:
     ports:
       - "127.0.0.1:18080:18080"
     depends_on:
+      auction-service:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      consul:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18080/readyz"]
@@ -74,10 +106,462 @@ services:
       timeout: 5s
       retries: 10
     networks:
+      live-auction:
+        aliases:
+          - gateway
+
+  auction-service:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-auction-service
+    restart: unless-stopped
+    entrypoint: ["/app/auction-service"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_INSTANCE_ID: "auction-service-prod"
+      AUCTION_ENV: "${AUCTION_ENV:-prod}"
+      AUCTION_GRPC_ADDR: ":19090"
+      AUCTION_OPERATIONS_ADDR: ":18086"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_REDIS_ADDR: "redis:6379"
+      AUCTION_REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
+      AUCTION_NATS_URLS: "${AUCTION_SERVICE_NATS_URLS:-${AUCTION_NATS_URLS:?AUCTION_NATS_URLS is required}}"
+      AUCTION_NATS_CLIENT_NAME: "live-auction-prod-auction-service"
+      AUCTION_JWT_SECRET: "${AUCTION_JWT_SECRET:?AUCTION_JWT_SECRET is required}"
+      AUCTION_JWT_ISSUER: "auction-backend"
+      AUCTION_PAYMENT_PROVIDER: "${AUCTION_PAYMENT_PROVIDER:?AUCTION_PAYMENT_PROVIDER is required}"
+      AUCTION_VERBOSE_BID_LOG: "${AUCTION_VERBOSE_BID_LOG:-false}"
+      AUCTION_OUTBOX_SHARDS: "16"
+      AUCTION_OUTBOX_PENDING_LIMIT: "${AUCTION_OUTBOX_PENDING_LIMIT:-3000}"
+      AUCTION_RUNTIME_GENERATION_GUARD_ENABLED: "${AUCTION_RUNTIME_GENERATION_GUARD_ENABLED:-true}"
+      AUCTION_RUNTIME_GENERATION_POLL_INTERVAL: "${AUCTION_RUNTIME_GENERATION_POLL_INTERVAL:-1s}"
+      AUCTION_RUNTIME_RECONCILE_INTERVAL: "${AUCTION_RUNTIME_RECONCILE_INTERVAL:-30s}"
+      AUCTION_PROJECTION_GATE_ENABLED: "true"
+      AUCTION_PROJECTION_GATE_REFRESH_INTERVAL: "${AUCTION_PROJECTION_GATE_REFRESH_INTERVAL:-2s}"
+      AUCTION_PROJECTION_GATE_REFRESH_TIMEOUT: "${AUCTION_PROJECTION_GATE_REFRESH_TIMEOUT:-1500ms}"
+      AUCTION_PROJECTION_GATE_MAX_STALENESS: "${AUCTION_PROJECTION_GATE_MAX_STALENESS:-6s}"
+      AUCTION_PROJECTION_GATE_MAX_LAG_RECORDS: "${AUCTION_PROJECTION_GATE_MAX_LAG_RECORDS:-1000}"
+      AUCTION_PROJECTION_GATE_MAX_OLDEST_AGE: "${AUCTION_PROJECTION_GATE_MAX_OLDEST_AGE:-30s}"
+      AUCTION_PROJECTION_GATE_RUNTIME_TOPIC_RETENTION: "${AUCTION_PROJECTION_GATE_RUNTIME_TOPIC_RETENTION:-2160h}"
+      AUCTION_PROJECTION_GATE_MIN_RETENTION_HEADROOM: "${AUCTION_PROJECTION_GATE_MIN_RETENTION_HEADROOM:-168h}"
+      AUCTION_PROJECTION_GATE_HEALTHY_POLLS_TO_OPEN: "${AUCTION_PROJECTION_GATE_HEALTHY_POLLS_TO_OPEN:-3}"
+      AUCTION_KAFKA_CLIENT_ID: "auction-service-projection-gate-prod"
+      AUCTION_DB_MAX_OPEN_CONNS: "${AUCTION_DB_MAX_OPEN_CONNS:-30}"
+      AUCTION_DB_MAX_IDLE_CONNS: "${AUCTION_DB_MAX_IDLE_CONNS:-15}"
+      AUCTION_DB_CONN_MAX_LIFETIME: "${AUCTION_DB_CONN_MAX_LIFETIME:-30m}"
+      AUCTION_DB_CONN_MAX_IDLE_TIME: "${AUCTION_DB_CONN_MAX_IDLE_TIME:-2m}"
+      AUCTION_REDIS_POOL_SIZE: "${AUCTION_REDIS_POOL_SIZE:-128}"
+      AUCTION_REDIS_MIN_IDLE_CONNS: "${AUCTION_REDIS_MIN_IDLE_CONNS:-16}"
+    expose:
+      - "19090"
+    ports:
+      - "127.0.0.1:18086:18086"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18086/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  outbox-relay:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-outbox-relay
+    restart: unless-stopped
+    entrypoint: ["/app/auction-outbox-relay"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_INSTANCE_ID: "outbox-relay-prod"
+      AUCTION_KAFKA_CLIENT_ID: "auction-outbox-relay-prod"
+      AUCTION_REDIS_ADDR: "redis:6379"
+      AUCTION_REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
+      AUCTION_OUTBOX_RELAY_OPERATIONS_ADDR: ":18082"
+      AUCTION_OUTBOX_SHARDS: "16"
+      AUCTION_OUTBOX_RELAY_LEASE_TTL: "${AUCTION_OUTBOX_RELAY_LEASE_TTL:-15s}"
+      AUCTION_OUTBOX_RELAY_RENEW_INTERVAL: "${AUCTION_OUTBOX_RELAY_RENEW_INTERVAL:-5s}"
+      AUCTION_OUTBOX_RELAY_OPERATION_TIMEOUT: "${AUCTION_OUTBOX_RELAY_OPERATION_TIMEOUT:-10s}"
+      AUCTION_OUTBOX_RELAY_RELEASE_TIMEOUT: "${AUCTION_OUTBOX_RELAY_RELEASE_TIMEOUT:-2s}"
+    ports:
+      - "127.0.0.1:18082:18082"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18082/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  projector:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-projector
+    restart: unless-stopped
+    entrypoint: ["/app/auction-projector"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_INSTANCE_ID: "projector-prod"
+      AUCTION_KAFKA_CLIENT_ID: "auction-projector-prod"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_PROJECTOR_GROUP_ID: "${AUCTION_PROJECTOR_GROUP_ID:-auction-projector-v1}"
+      AUCTION_PROJECTOR_OPERATIONS_ADDR: ":18083"
+      AUCTION_PROJECTOR_MAX_POLL_RECORDS: "${AUCTION_PROJECTOR_MAX_POLL_RECORDS:-500}"
+      AUCTION_PROJECTOR_SESSION_TIMEOUT: "${AUCTION_PROJECTOR_SESSION_TIMEOUT:-30s}"
+      AUCTION_PROJECTOR_HEARTBEAT_INTERVAL: "${AUCTION_PROJECTOR_HEARTBEAT_INTERVAL:-3s}"
+      AUCTION_PROJECTOR_RETRY_ATTEMPTS: "${AUCTION_PROJECTOR_RETRY_ATTEMPTS:-5}"
+      AUCTION_PROJECTOR_RETRY_BASE_DELAY: "${AUCTION_PROJECTOR_RETRY_BASE_DELAY:-20ms}"
+      AUCTION_PROJECTOR_RETRY_MAX_DELAY: "${AUCTION_PROJECTOR_RETRY_MAX_DELAY:-1s}"
+      AUCTION_PROJECTOR_DB_MAX_OPEN_CONNS: "${AUCTION_PROJECTOR_DB_MAX_OPEN_CONNS:-12}"
+      AUCTION_PROJECTOR_DB_MAX_IDLE_CONNS: "${AUCTION_PROJECTOR_DB_MAX_IDLE_CONNS:-6}"
+      AUCTION_PROJECTOR_DB_CONN_MAX_LIFETIME: "${AUCTION_PROJECTOR_DB_CONN_MAX_LIFETIME:-30m}"
+      AUCTION_PROJECTOR_DB_CONN_MAX_IDLE_TIME: "${AUCTION_PROJECTOR_DB_CONN_MAX_IDLE_TIME:-2m}"
+    ports:
+      - "127.0.0.1:18083:18083"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18083/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  domain-relay:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-domain-relay
+    restart: unless-stopped
+    entrypoint: ["/app/auction-domain-relay"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_INSTANCE_ID: "domain-relay-prod"
+      AUCTION_KAFKA_CLIENT_ID: "auction-domain-relay-prod"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_DOMAIN_RELAY_NATS_URLS: "${AUCTION_DOMAIN_RELAY_NATS_URLS:?AUCTION_DOMAIN_RELAY_NATS_URLS is required}"
+      AUCTION_DOMAIN_RELAY_OPERATIONS_ADDR: ":18084"
+      AUCTION_DOMAIN_RELAY_CLAIM_LIMIT: "${AUCTION_DOMAIN_RELAY_CLAIM_LIMIT:-16}"
+      AUCTION_DOMAIN_RELAY_CONCURRENCY: "${AUCTION_DOMAIN_RELAY_CONCURRENCY:-16}"
+      AUCTION_DOMAIN_RELAY_LEASE_TTL: "${AUCTION_DOMAIN_RELAY_LEASE_TTL:-30s}"
+      AUCTION_DOMAIN_RELAY_OPERATION_TIMEOUT: "${AUCTION_DOMAIN_RELAY_OPERATION_TIMEOUT:-5s}"
+      AUCTION_DOMAIN_RELAY_IDLE_INTERVAL: "${AUCTION_DOMAIN_RELAY_IDLE_INTERVAL:-250ms}"
+      AUCTION_DOMAIN_RELAY_RETRY_BASE: "${AUCTION_DOMAIN_RELAY_RETRY_BASE:-100ms}"
+      AUCTION_DOMAIN_RELAY_RETRY_MAX: "${AUCTION_DOMAIN_RELAY_RETRY_MAX:-10s}"
+      AUCTION_DOMAIN_RELAY_STATS_INTERVAL: "${AUCTION_DOMAIN_RELAY_STATS_INTERVAL:-5s}"
+      AUCTION_DOMAIN_RELAY_MAX_ATTEMPTS: "${AUCTION_DOMAIN_RELAY_MAX_ATTEMPTS:-8}"
+      AUCTION_DOMAIN_RELAY_DB_MAX_OPEN_CONNS: "${AUCTION_DOMAIN_RELAY_DB_MAX_OPEN_CONNS:-8}"
+      AUCTION_DOMAIN_RELAY_DB_MAX_IDLE_CONNS: "${AUCTION_DOMAIN_RELAY_DB_MAX_IDLE_CONNS:-4}"
+      AUCTION_DOMAIN_RELAY_DB_CONN_MAX_LIFETIME: "${AUCTION_DOMAIN_RELAY_DB_CONN_MAX_LIFETIME:-30m}"
+      AUCTION_DOMAIN_RELAY_DB_CONN_MAX_IDLE_TIME: "${AUCTION_DOMAIN_RELAY_DB_CONN_MAX_IDLE_TIME:-2m}"
+    ports:
+      - "127.0.0.1:18084:18084"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18084/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  enrichment-consumer:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-enrichment-consumer
+    restart: unless-stopped
+    entrypoint: ["/app/auction-enrichment-consumer"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_INSTANCE_ID: "enrichment-consumer-prod"
+      AUCTION_KAFKA_CLIENT_ID: "auction-enrichment-consumer-prod"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_ENRICHMENT_GROUP_ID: "${AUCTION_ENRICHMENT_GROUP_ID:-auction-order-enrichment-v1}"
+      AUCTION_ENRICHMENT_OPERATIONS_ADDR: ":18087"
+      AUCTION_ENRICHMENT_MAX_POLL_RECORDS: "${AUCTION_ENRICHMENT_MAX_POLL_RECORDS:-100}"
+      AUCTION_ENRICHMENT_SESSION_TIMEOUT: "${AUCTION_ENRICHMENT_SESSION_TIMEOUT:-30s}"
+      AUCTION_ENRICHMENT_HEARTBEAT_INTERVAL: "${AUCTION_ENRICHMENT_HEARTBEAT_INTERVAL:-3s}"
+      AUCTION_ENRICHMENT_RETRY_ATTEMPTS: "${AUCTION_ENRICHMENT_RETRY_ATTEMPTS:-5}"
+      AUCTION_ENRICHMENT_RETRY_BASE: "${AUCTION_ENRICHMENT_RETRY_BASE:-100ms}"
+      AUCTION_ENRICHMENT_RETRY_MAX: "${AUCTION_ENRICHMENT_RETRY_MAX:-5s}"
+      AUCTION_ENRICHMENT_OPERATION_TIMEOUT: "${AUCTION_ENRICHMENT_OPERATION_TIMEOUT:-5s}"
+      AUCTION_ENRICHMENT_DB_MAX_OPEN_CONNS: "${AUCTION_ENRICHMENT_DB_MAX_OPEN_CONNS:-8}"
+      AUCTION_ENRICHMENT_DB_MAX_IDLE_CONNS: "${AUCTION_ENRICHMENT_DB_MAX_IDLE_CONNS:-4}"
+      AUCTION_ENRICHMENT_DB_CONN_MAX_LIFETIME: "${AUCTION_ENRICHMENT_DB_CONN_MAX_LIFETIME:-30m}"
+      AUCTION_ENRICHMENT_DB_CONN_MAX_IDLE_TIME: "${AUCTION_ENRICHMENT_DB_CONN_MAX_IDLE_TIME:-2m}"
+    ports:
+      - "127.0.0.1:18087:18087"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18087/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  index-pgvector:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-index-pgvector
+    profiles: ["search"]
+    restart: unless-stopped
+    entrypoint: ["/app/auction-index-pgvector"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_INSTANCE_ID: "index-pgvector-prod"
+      AUCTION_KAFKA_CLIENT_ID: "auction-index-pgvector-prod"
+      AUCTION_SEARCH_PG_DSN: "postgres://auction_search:${AUCTION_SEARCH_PG_PASSWORD:-auction_search}@pgvector:5432/live_auction_search?sslmode=disable"
+      AUCTION_VECTOR_GROUP_ID: "${AUCTION_VECTOR_GROUP_ID:-search-pgvector-v1}"
+      AUCTION_VECTOR_OPERATIONS_ADDR: ":18089"
+      AUCTION_VECTOR_MAX_POLL_RECORDS: "${AUCTION_VECTOR_MAX_POLL_RECORDS:-100}"
+      AUCTION_VECTOR_SESSION_TIMEOUT: "${AUCTION_VECTOR_SESSION_TIMEOUT:-30s}"
+      AUCTION_VECTOR_HEARTBEAT_INTERVAL: "${AUCTION_VECTOR_HEARTBEAT_INTERVAL:-3s}"
+      AUCTION_VECTOR_RETRY_ATTEMPTS: "${AUCTION_VECTOR_RETRY_ATTEMPTS:-5}"
+      AUCTION_VECTOR_RETRY_BASE: "${AUCTION_VECTOR_RETRY_BASE:-200ms}"
+      AUCTION_VECTOR_RETRY_MAX: "${AUCTION_VECTOR_RETRY_MAX:-10s}"
+      AUCTION_VECTOR_OPERATION_TIMEOUT: "${AUCTION_VECTOR_OPERATION_TIMEOUT:-10s}"
+      AUCTION_VECTOR_DB_MAX_OPEN_CONNS: "${AUCTION_VECTOR_DB_MAX_OPEN_CONNS:-8}"
+      AUCTION_VECTOR_DB_MAX_IDLE_CONNS: "${AUCTION_VECTOR_DB_MAX_IDLE_CONNS:-4}"
+      AUCTION_VECTOR_DB_CONN_MAX_LIFETIME: "${AUCTION_VECTOR_DB_CONN_MAX_LIFETIME:-30m}"
+      AUCTION_VECTOR_DB_CONN_MAX_IDLE_TIME: "${AUCTION_VECTOR_DB_CONN_MAX_IDLE_TIME:-2m}"
+      AUCTION_EMBEDDING_PROVIDER: "${AUCTION_EMBEDDING_PROVIDER:-dashscope}"
+      AUCTION_EMBEDDING_BASE_URL: "${AUCTION_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+      AUCTION_EMBEDDING_MODEL: "${AUCTION_EMBEDDING_MODEL:-text-embedding-v4}"
+      AUCTION_EMBEDDING_MODEL_VERSION: "${AUCTION_EMBEDDING_MODEL_VERSION:-text-embedding-v4}"
+      AUCTION_EMBEDDING_DIMENSIONS: "${AUCTION_EMBEDDING_DIMENSIONS:-1024}"
+      AUCTION_EMBEDDING_BATCH_SIZE: "${AUCTION_EMBEDDING_BATCH_SIZE:-10}"
+      AUCTION_EMBEDDING_TIMEOUT: "${AUCTION_EMBEDDING_TIMEOUT:-8s}"
+      AUCTION_EMBEDDING_COST_PER_MILLION_TOKENS: "${AUCTION_EMBEDDING_COST_PER_MILLION_TOKENS:-0}"
+      AUCTION_EMBEDDING_API_KEY: "${AUCTION_EMBEDDING_API_KEY:-}"
+    ports:
+      - "127.0.0.1:18089:18089"
+    depends_on:
+      pgvector-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18089/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  index-es:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-index-es
+    profiles: ["search"]
+    restart: unless-stopped
+    entrypoint: ["/app/auction-index-es"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_INSTANCE_ID: "index-es-prod"
+      AUCTION_KAFKA_CLIENT_ID: "auction-index-es-prod"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_ES_URL: "http://elasticsearch:9200"
+      AUCTION_ES_USERNAME: "${AUCTION_ES_USERNAME:-elastic}"
+      AUCTION_ES_PASSWORD: "${AUCTION_ES_PASSWORD:?AUCTION_ES_PASSWORD is required}"
+      AUCTION_ES_WRITE_ALIAS: "${AUCTION_ES_WRITE_ALIAS:-auction-lots-current}"
+      AUCTION_ES_GROUP_ID: "${AUCTION_ES_GROUP_ID:-search-es-v1}"
+      AUCTION_ES_OPERATIONS_ADDR: ":18088"
+      AUCTION_ES_MAX_POLL_RECORDS: "${AUCTION_ES_MAX_POLL_RECORDS:-100}"
+      AUCTION_ES_SESSION_TIMEOUT: "${AUCTION_ES_SESSION_TIMEOUT:-30s}"
+      AUCTION_ES_HEARTBEAT_INTERVAL: "${AUCTION_ES_HEARTBEAT_INTERVAL:-3s}"
+      AUCTION_ES_RETRY_ATTEMPTS: "${AUCTION_ES_RETRY_ATTEMPTS:-5}"
+      AUCTION_ES_RETRY_BASE: "${AUCTION_ES_RETRY_BASE:-200ms}"
+      AUCTION_ES_RETRY_MAX: "${AUCTION_ES_RETRY_MAX:-10s}"
+      AUCTION_ES_OPERATION_TIMEOUT: "${AUCTION_ES_OPERATION_TIMEOUT:-10s}"
+      AUCTION_ES_REQUEST_TIMEOUT: "${AUCTION_ES_REQUEST_TIMEOUT:-5s}"
+      AUCTION_ES_MAX_RESPONSE_BYTES: "${AUCTION_ES_MAX_RESPONSE_BYTES:-1048576}"
+      AUCTION_ES_DB_MAX_OPEN_CONNS: "${AUCTION_ES_DB_MAX_OPEN_CONNS:-4}"
+      AUCTION_ES_DB_MAX_IDLE_CONNS: "${AUCTION_ES_DB_MAX_IDLE_CONNS:-2}"
+      AUCTION_ES_DB_CONN_MAX_LIFETIME: "${AUCTION_ES_DB_CONN_MAX_LIFETIME:-30m}"
+      AUCTION_ES_DB_CONN_MAX_IDLE_TIME: "${AUCTION_ES_DB_CONN_MAX_IDLE_TIME:-2m}"
+    ports:
+      - "127.0.0.1:18088:18088"
+    depends_on:
+      elasticsearch-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18088/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  search-reconciler:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-search-reconciler
+    profiles: ["search"]
+    restart: unless-stopped
+    entrypoint: ["/app/auction-search-reconciler"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_KAFKA_CLIENT_ID: "auction-search-reconciler-prod"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_ES_URL: "http://elasticsearch:9200"
+      AUCTION_ES_USERNAME: "${AUCTION_ES_USERNAME:-elastic}"
+      AUCTION_ES_PASSWORD: "${AUCTION_ES_PASSWORD:?AUCTION_ES_PASSWORD is required}"
+      AUCTION_ES_WRITE_ALIAS: "${AUCTION_ES_WRITE_ALIAS:-auction-lots-current}"
+      AUCTION_SEARCH_PG_DSN: "postgres://auction_search:${AUCTION_SEARCH_PG_PASSWORD:-auction_search}@pgvector:5432/live_auction_search?sslmode=disable"
+      AUCTION_EMBEDDING_PROVIDER: "${AUCTION_EMBEDDING_PROVIDER:-dashscope}"
+      AUCTION_EMBEDDING_MODEL: "${AUCTION_EMBEDDING_MODEL:-text-embedding-v4}"
+      AUCTION_EMBEDDING_MODEL_VERSION: "${AUCTION_EMBEDDING_MODEL_VERSION:-text-embedding-v4}"
+      AUCTION_EMBEDDING_DIMENSIONS: "${AUCTION_EMBEDDING_DIMENSIONS:-1024}"
+      AUCTION_SEARCH_RECONCILE_OPERATIONS_ADDR: ":18090"
+      AUCTION_SEARCH_RECONCILE_INTERVAL: "${AUCTION_SEARCH_RECONCILE_INTERVAL:-1m}"
+      AUCTION_SEARCH_RECONCILE_PAGE_SIZE: "${AUCTION_SEARCH_RECONCILE_PAGE_SIZE:-100}"
+      AUCTION_SEARCH_RECONCILE_CONCURRENCY: "${AUCTION_SEARCH_RECONCILE_CONCURRENCY:-8}"
+      AUCTION_SEARCH_RECONCILE_OPERATION_TIMEOUT: "${AUCTION_SEARCH_RECONCILE_OPERATION_TIMEOUT:-5s}"
+    ports:
+      - "127.0.0.1:18090:18090"
+    depends_on:
+      elasticsearch-init:
+        condition: service_completed_successfully
+      pgvector-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18090/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - live-auction
+
+  search-rebuild-es:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    profiles: ["search-ops"]
+    entrypoint: ["/app/auction-search-rebuild"]
+    command: ["--dry-run"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_KAFKA_CLIENT_ID: "auction-search-rebuild-prod"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_ES_URL: "http://elasticsearch:9200"
+      AUCTION_ES_USERNAME: "${AUCTION_ES_USERNAME:-elastic}"
+      AUCTION_ES_PASSWORD: "${AUCTION_ES_PASSWORD:?AUCTION_ES_PASSWORD is required}"
+      AUCTION_ES_WRITE_ALIAS: "${AUCTION_ES_WRITE_ALIAS:-auction-lots-current}"
+      AUCTION_ES_MAPPING_FILE: /app/elasticsearch/index-v1.json
+      AUCTION_SEARCH_REBUILD_STARTUP_TIMEOUT: "${AUCTION_SEARCH_REBUILD_STARTUP_TIMEOUT:-30s}"
+      AUCTION_SEARCH_REBUILD_OPERATION_TIMEOUT: "${AUCTION_SEARCH_REBUILD_OPERATION_TIMEOUT:-15s}"
+    depends_on:
+      elasticsearch-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - live-auction
+
+  search-rebuild-pgvector:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    profiles: ["search-ops"]
+    entrypoint: ["/app/auction-search-rebuild"]
+    command: ["--sink=pgvector", "--dry-run"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      <<: *kafka-client-env
+      AUCTION_KAFKA_CLIENT_ID: "auction-search-rebuild-pgvector-prod"
+      AUCTION_MYSQL_DSN: "auction:${AUCTION_MYSQL_PASSWORD:?AUCTION_MYSQL_PASSWORD is required}@tcp(mysql:3306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local"
+      AUCTION_SEARCH_PG_DSN: "postgres://auction_search:${AUCTION_SEARCH_PG_PASSWORD:-auction_search}@pgvector:5432/live_auction_search?sslmode=disable"
+      AUCTION_EMBEDDING_PROVIDER: "${AUCTION_EMBEDDING_PROVIDER:-dashscope}"
+      AUCTION_EMBEDDING_BASE_URL: "${AUCTION_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+      AUCTION_EMBEDDING_MODEL: "${AUCTION_EMBEDDING_MODEL:-text-embedding-v4}"
+      AUCTION_EMBEDDING_MODEL_VERSION: "${AUCTION_EMBEDDING_MODEL_VERSION:-text-embedding-v4}"
+      AUCTION_EMBEDDING_DIMENSIONS: "${AUCTION_EMBEDDING_DIMENSIONS:-1024}"
+      AUCTION_EMBEDDING_BATCH_SIZE: "${AUCTION_EMBEDDING_BATCH_SIZE:-10}"
+      AUCTION_EMBEDDING_TIMEOUT: "${AUCTION_EMBEDDING_TIMEOUT:-8s}"
+      AUCTION_EMBEDDING_COST_PER_MILLION_TOKENS: "${AUCTION_EMBEDDING_COST_PER_MILLION_TOKENS:-0}"
+      AUCTION_EMBEDDING_API_KEY: "${AUCTION_EMBEDDING_API_KEY:-}"
+      AUCTION_SEARCH_REBUILD_STARTUP_TIMEOUT: "${AUCTION_SEARCH_REBUILD_STARTUP_TIMEOUT:-30s}"
+      AUCTION_SEARCH_REBUILD_OPERATION_TIMEOUT: "${AUCTION_SEARCH_REBUILD_OPERATION_TIMEOUT:-15s}"
+    depends_on:
+      pgvector-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - live-auction
+
+  close-worker:
+    image: "${LIVE_AUCTION_BACKEND_IMAGE:?LIVE_AUCTION_BACKEND_IMAGE is required}"
+    container_name: live-auction-close-worker
+    restart: unless-stopped
+    entrypoint: ["/app/auction-close-worker"]
+    env_file:
+      - "${LIVE_AUCTION_ENV_FILE:-/opt/live-auction/.env}"
+    environment:
+      AUCTION_INSTANCE_ID: close-worker-prod
+      AUCTION_REDIS_ADDR: redis:6379
+      AUCTION_REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
+      AUCTION_RUNTIME_GENERATION_POLL_INTERVAL: "${AUCTION_RUNTIME_GENERATION_POLL_INTERVAL:-1s}"
+      AUCTION_CLOSE_WORKER_OPERATIONS_ADDR: ":18085"
+      AUCTION_CLOSE_WORKER_INTERVAL: "${AUCTION_CLOSE_WORKER_INTERVAL:-250ms}"
+      AUCTION_CLOSE_WORKER_BATCH_LIMIT: "${AUCTION_CLOSE_WORKER_BATCH_LIMIT:-200}"
+      AUCTION_CLOSE_WORKER_CONCURRENCY: "${AUCTION_CLOSE_WORKER_CONCURRENCY:-8}"
+      AUCTION_CLOSE_WORKER_OPERATION_TIMEOUT: "${AUCTION_CLOSE_WORKER_OPERATION_TIMEOUT:-2s}"
+    ports:
+      - "127.0.0.1:18085:18085"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:18085/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
       - live-auction
 
   mysql:
-    image: mysql:8.4
+    image: mysql:8.4.9@sha256:c36050afdca850f23cef85703f84c7531a5ae155a11b5ee1c60acb09937c4084
     container_name: live-auction-mysql
     restart: unless-stopped
     environment:
@@ -101,12 +585,13 @@ services:
       - live-auction
 
   redis:
-    image: redis:7.2-alpine
+    image: redis:7.2.4-alpine@sha256:c8bb255c3559b3e458766db810aa7b3c7af1235b204cfdb304e79ff388fe1a5a
     container_name: live-auction-redis
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
-    command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+      REDIS_MAXMEMORY: "${AUCTION_REDIS_MAXMEMORY:?AUCTION_REDIS_MAXMEMORY is required}"
+    command: ["sh", "-c", "redis-server --appendonly yes --appendfsync everysec --requirepass \"$${REDIS_PASSWORD}\" --maxmemory \"$${REDIS_MAXMEMORY}\" --maxmemory-policy noeviction --stop-writes-on-bgsave-error yes --repl-diskless-sync yes"]
     volumes:
       - live-auction-redis:/data
     healthcheck:
@@ -118,10 +603,10 @@ services:
       - live-auction
 
   pgvector:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
     container_name: live-auction-pgvector
     restart: unless-stopped
-    profiles: ["search"]
+    profiles: ["search", "search-ops"]
     environment:
       POSTGRES_DB: live_auction_search
       POSTGRES_USER: auction_search
@@ -143,21 +628,208 @@ services:
     networks:
       - live-auction
 
-  consul:
-    image: hashicorp/consul:1.18
-    container_name: live-auction-consul
+  pgvector-init:
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+    container_name: live-auction-pgvector-init
+    profiles: ["search", "search-ops"]
+    entrypoint: ["psql"]
+    command: ["-v", "ON_ERROR_STOP=1", "-h", "pgvector", "-U", "auction_search", "-d", "live_auction_search", "-f", "/migrations/000001_search_schema.up.sql"]
+    environment:
+      PGPASSWORD: "${AUCTION_SEARCH_PG_PASSWORD:-auction_search}"
+    volumes:
+      - ../postgres/migrations:/migrations:ro
+    depends_on:
+      pgvector:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - live-auction
+
+  elasticsearch:
+    build:
+      context: ./backend
+      dockerfile: deploy/elasticsearch/Dockerfile
+    image: "${LIVE_AUCTION_ELASTICSEARCH_IMAGE:?LIVE_AUCTION_ELASTICSEARCH_IMAGE is required}"
+    container_name: live-auction-elasticsearch
+    profiles: ["search", "search-ops"]
     restart: unless-stopped
-    command: ["agent", "-dev", "-client=0.0.0.0"]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.license.self_generated.type: basic
+      ELASTIC_PASSWORD: "${AUCTION_ES_PASSWORD:?AUCTION_ES_PASSWORD is required}"
+      ES_JAVA_OPTS: "${AUCTION_ES_JAVA_OPTS:--Xms512m -Xmx512m}"
+    volumes:
+      - live-auction-elasticsearch:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD", "consul", "members"]
+      test: ["CMD-SHELL", "curl -fsS -u 'elastic:$${ELASTIC_PASSWORD}' 'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null"]
       interval: 10s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65535
+        hard: 65535
+    networks:
+      - live-auction
+
+  elasticsearch-init:
+    image: "${LIVE_AUCTION_ELASTICSEARCH_IMAGE:?LIVE_AUCTION_ELASTICSEARCH_IMAGE is required}"
+    container_name: live-auction-elasticsearch-init
+    profiles: ["search", "search-ops"]
+    entrypoint: ["/bin/bash"]
+    command: ["/auction-elasticsearch/init-index.sh"]
+    environment:
+      AUCTION_ES_URL: "http://elasticsearch:9200"
+      AUCTION_ES_USERNAME: "${AUCTION_ES_USERNAME:-elastic}"
+      AUCTION_ES_PASSWORD: "${AUCTION_ES_PASSWORD:?AUCTION_ES_PASSWORD is required}"
+      AUCTION_ES_INDEX_NAME: "${AUCTION_ES_INDEX_NAME:-auction-lots-v1}"
+      AUCTION_ES_WRITE_ALIAS: "${AUCTION_ES_WRITE_ALIAS:-auction-lots-current}"
+    volumes:
+      - ./backend/deploy/elasticsearch:/auction-elasticsearch:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - live-auction
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0@sha256:4150e46b2e9697ac30e4be8de03ec1704b4bdc7037577b83b8d35a32be298c16
+    container_name: live-auction-kafka-exporter
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        set -- "--kafka.server=$${AUCTION_KAFKA_EXPORTER_BROKER}"
+        case "$${AUCTION_KAFKA_EXPORTER_SECURITY_PROTOCOL}" in
+          PLAINTEXT) ;;
+          SSL) set -- "$$@" --tls.enabled ;;
+          SASL_PLAINTEXT|SASL_SSL)
+            mechanism="$$(printf '%s' "$${AUCTION_KAFKA_EXPORTER_SASL_MECHANISM}" | tr '[:upper:]_' '[:lower:]-')"
+            case "$$mechanism" in
+              scram-sha-256) mechanism=sha256 ;;
+              scram-sha-512) mechanism=sha512 ;;
+              plain) mechanism=plain ;;
+              *) echo "unsupported Kafka exporter SASL mechanism: $$mechanism" >&2; exit 2 ;;
+            esac
+            set -- "$$@" --sasl.enabled "--sasl.mechanism=$$mechanism" \
+              "--sasl.username=$${AUCTION_KAFKA_EXPORTER_SASL_USERNAME}" \
+              "--sasl.password=$${AUCTION_KAFKA_EXPORTER_SASL_PASSWORD}"
+            if [ "$${AUCTION_KAFKA_EXPORTER_SECURITY_PROTOCOL}" = SASL_SSL ]; then set -- "$$@" --tls.enabled; fi
+            ;;
+          *) echo "unsupported Kafka exporter security protocol" >&2; exit 2 ;;
+        esac
+        if [ -n "$${AUCTION_KAFKA_EXPORTER_TLS_SERVER_NAME}" ]; then
+          set -- "$$@" "--tls.server-name=$${AUCTION_KAFKA_EXPORTER_TLS_SERVER_NAME}"
+        fi
+        if [ -n "$${AUCTION_KAFKA_EXPORTER_TLS_CA_FILE}" ]; then
+          set -- "$$@" "--tls.ca-file=$${AUCTION_KAFKA_EXPORTER_TLS_CA_FILE}"
+        fi
+        if [ "$${AUCTION_KAFKA_EXPORTER_TLS_INSECURE_SKIP_VERIFY}" = true ]; then
+          set -- "$$@" --tls.insecure-skip-tls-verify
+        fi
+        exec /bin/kafka_exporter "$$@"
+    environment:
+      AUCTION_KAFKA_EXPORTER_BROKER: "${AUCTION_KAFKA_EXPORTER_BROKER:-${AUCTION_KAFKA_BROKERS}}"
+      AUCTION_KAFKA_EXPORTER_SECURITY_PROTOCOL: "${AUCTION_KAFKA_EXPORTER_SECURITY_PROTOCOL:-${AUCTION_KAFKA_SECURITY_PROTOCOL}}"
+      AUCTION_KAFKA_EXPORTER_SASL_MECHANISM: "${AUCTION_KAFKA_EXPORTER_SASL_MECHANISM:-${AUCTION_KAFKA_SASL_MECHANISM:-PLAIN}}"
+      AUCTION_KAFKA_EXPORTER_SASL_USERNAME: "${AUCTION_KAFKA_EXPORTER_SASL_USERNAME:-${AUCTION_KAFKA_SASL_USERNAME:-}}"
+      AUCTION_KAFKA_EXPORTER_SASL_PASSWORD: "${AUCTION_KAFKA_EXPORTER_SASL_PASSWORD:-${AUCTION_KAFKA_SASL_PASSWORD:-}}"
+      AUCTION_KAFKA_EXPORTER_TLS_SERVER_NAME: "${AUCTION_KAFKA_EXPORTER_TLS_SERVER_NAME:-${AUCTION_KAFKA_TLS_SERVER_NAME:-}}"
+      AUCTION_KAFKA_EXPORTER_TLS_CA_FILE: "${AUCTION_KAFKA_EXPORTER_TLS_CA_FILE:-${AUCTION_KAFKA_TLS_CA_FILE:-}}"
+      AUCTION_KAFKA_EXPORTER_TLS_INSECURE_SKIP_VERIFY: "${AUCTION_KAFKA_EXPORTER_TLS_INSECURE_SKIP_VERIFY:-false}"
+    networks:
+      - live-auction
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.84.0@sha256:7ef8e9c26638158fa4e7ad60df8c7e53d1919986753d6c1d2d1876b6ec38d87b
+    container_name: live-auction-redis-exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: "${AUCTION_REDIS_PASSWORD:?AUCTION_REDIS_PASSWORD is required}"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - live-auction
+
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:0.18.0@sha256:02469dc907bcc4a941acca7ddc087745d4a28f7b280733be31775eaf3b0589b9
+    container_name: live-auction-nats-exporter
+    restart: unless-stopped
+    command: ["-varz", "-connz", "-subz", "-routez", "${AUCTION_NATS_EXPORTER_URL:-http://nats:8222}"]
+    networks:
+      - live-auction
+
+  elasticsearch-exporter:
+    image: prometheuscommunity/elasticsearch-exporter:v1.10.0@sha256:a6a4d4403f670faf6a94b8c7f9adbca3ead91f26dd64e5ccf95fa69025dc6e58
+    container_name: live-auction-elasticsearch-exporter
+    profiles: ["search", "search-ops"]
+    restart: unless-stopped
+    command: ["--es.uri=http://elasticsearch:9200", "--es.all", "--es.indices"]
+    environment:
+      ES_USERNAME: "${AUCTION_ES_USERNAME:-elastic}"
+      ES_PASSWORD: "${AUCTION_ES_PASSWORD:?AUCTION_ES_PASSWORD is required}"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - live-auction
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.19.1@sha256:e96064f876226d94bb6ce48a4c4b3dd76edba91168ec1ab024e5c4b959310b0f
+    container_name: live-auction-postgres-exporter
+    profiles: ["search", "search-ops"]
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_URI: "pgvector:5432/live_auction_search?sslmode=disable"
+      DATA_SOURCE_USER: auction_search
+      DATA_SOURCE_PASS: "${AUCTION_SEARCH_PG_PASSWORD:?AUCTION_SEARCH_PG_PASSWORD is required}"
+    depends_on:
+      pgvector:
+        condition: service_healthy
+    networks:
+      - live-auction
+
+  mysql-exporter:
+    image: quay.io/prometheus/mysqld-exporter:v0.19.0@sha256:eacb4b18e2ec1e0abdf2d64851b68526c964f6d9cb3e9458fb5d5f5062ea94c1
+    container_name: live-auction-mysql-exporter
+    restart: unless-stopped
+    command:
+      - --mysqld.address=mysql:3306
+      - --mysqld.username=exporter
+      - --collect.info_schema.innodb_metrics
+      - --collect.info_schema.processlist
+      - --collect.perf_schema.eventsstatements
+    environment:
+      MYSQLD_EXPORTER_PASSWORD: "${AUCTION_MYSQL_EXPORTER_PASSWORD:?AUCTION_MYSQL_EXPORTER_PASSWORD is required}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - live-auction
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.11.1@sha256:0f422f62c15f154af8d8572b23d623aebfb10cec73a5c654d18f911f3f9df241
+    container_name: live-auction-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
     networks:
       - live-auction
 
   prometheus:
-    image: prom/prometheus:v2.53.1
+    image: prom/prometheus:v2.53.1@sha256:f20d3127bf2876f4a1df76246fca576b41ddf1125ed1c546fbd8b16ea55117e6
     container_name: live-auction-prometheus
     restart: unless-stopped
     command:
@@ -168,26 +840,39 @@ services:
     ports:
       - "127.0.0.1:19090:9090"
     volumes:
-      - ./backend/deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./backend/deploy/prometheus/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
+      - ./backend/deploy/prometheus/rules:/etc/prometheus/rules:ro
       - live-auction-prometheus:/prometheus
     depends_on:
       auction-backend:
+        condition: service_healthy
+      auction-service:
+        condition: service_healthy
+      outbox-relay:
+        condition: service_healthy
+      projector:
+        condition: service_healthy
+      domain-relay:
+        condition: service_healthy
+      enrichment-consumer:
+        condition: service_healthy
+      close-worker:
         condition: service_healthy
     networks:
       - live-auction
 
   grafana:
-    image: grafana/grafana:11.1.4
+    image: grafana/grafana:11.1.4@sha256:886b56d5534e54f69a8cfcb4b8928da8fc753178a7a3d20c3f9b04b660169805
     container_name: live-auction-grafana
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}"
       GF_USERS_DEFAULT_THEME: "light"
-      GF_AUTH_ANONYMOUS_ENABLED: "${GRAFANA_ANONYMOUS_ENABLED:-true}"
+      GF_AUTH_ANONYMOUS_ENABLED: "${GRAFANA_ANONYMOUS_ENABLED:-false}"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
     ports:
-      - "13000:3000"
+      - "127.0.0.1:13000:3000"
     volumes:
       - ./backend/deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./backend/deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -201,6 +886,7 @@ volumes:
   live-auction-mysql:
   live-auction-redis:
   live-auction-pgvector:
+  live-auction-elasticsearch:
   live-auction-prometheus:
   live-auction-grafana:
 
