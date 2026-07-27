@@ -172,9 +172,11 @@ if produce_marker kafka-3 two-brokers-down >"$kafka_failure_log" 2>&1; then
   exit 1
 fi
 rm -f "$kafka_failure_log"
-"${compose[@]}" start kafka-1 kafka-2 >/dev/null
+"${compose[@]}" stop -t 10 kafka-3 >/dev/null
+"${compose[@]}" start kafka-1 kafka-2 kafka-3 >/dev/null
 wait_for_kafka kafka-1
 wait_for_kafka kafka-2
+wait_for_kafka kafka-3
 assert_kafka_markers
 printf 'component=kafka status=passed rf=3 min_isr=2 one_failure=available two_failures=rejected acknowledged_records_retained=true\n'
 
