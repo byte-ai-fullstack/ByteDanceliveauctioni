@@ -73,6 +73,8 @@ jobs:
         working-directory: live-auction-bid-backend
     steps:
       - uses: actions/checkout@v6
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ripgrep
       - uses: actions/setup-go@v6
         with:
           go-version-file: live-auction-bid-backend/go.mod
@@ -170,6 +172,8 @@ jobs:
         working-directory: live-auction-bid-backend
     steps:
       - uses: actions/checkout@v6
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ripgrep
       - name: Configure Elasticsearch host limit
         run: sudo sysctl -w vm.max_map_count=262144
       - name: Run infrastructure smoke and archive output
@@ -195,6 +199,8 @@ jobs:
         working-directory: live-auction-bid-backend
     steps:
       - uses: actions/checkout@v6
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ripgrep
       - name: Run quorum and failover drill
         shell: bash
         run: |
