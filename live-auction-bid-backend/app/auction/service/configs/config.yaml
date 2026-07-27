@@ -12,8 +12,6 @@ data:
   redis:
     addr: "redis:6379"
     password: "auction_redis"
-  consul:
-    addr: "consul:8500"
 
 auth:
   jwt:

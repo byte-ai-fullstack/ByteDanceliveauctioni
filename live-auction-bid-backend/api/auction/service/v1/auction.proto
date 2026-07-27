@@ -261,6 +261,31 @@ service AuctionService {
       body: "*"
     };
   }
+
+  // 获取当前买家在房间当前版本上的私有覆盖状态。
+  //
+  // 调用方：已登录观众端。
+  // 用途：私人 WebSocket 增量丢失、订单仍在投影时，只恢复当前用户状态。
+  // 订单为 CREATING 时 HTTP 映射返回 202 和 Retry-After；READY/NONE 返回 200。
+  rpc GetRoomPersonalState(GetRoomPersonalStateRequest) returns (GetRoomPersonalStateReply) {
+    option (google.api.http) = {
+      get: "/api/rooms/{room_id}/me"
+    };
+  }
+}
+
+// AuctionCommandService 是 gateway 到 auction-service 的内部同步边界。
+//
+// 只有会改变竞拍运行态的核心命令进入该服务。反狙击延时属于 PlaceBid
+// 的同一次 Redis Lua 原子裁决，不暴露独立 RPC，避免检查与延时之间产生竞态。
+// 该服务不提供 HTTP 映射，也不应直接暴露到公网。
+service AuctionCommandService {
+  rpc StartLot(StartLotRequest) returns (StartLotReply);
+  rpc PlaceBid(PlaceBidRequest) returns (PlaceBidReply);
+  rpc RevealTrustCard(RevealTrustCardRequest) returns (RevealTrustCardReply);
+  rpc StartDuel(StartDuelRequest) returns (StartDuelReply);
+  rpc SettleLot(SettleLotRequest) returns (SettleLotReply);
+  rpc CancelLot(CancelLotRequest) returns (CancelLotReply);
 }
 
 // ============================================================================
@@ -723,6 +748,12 @@ message Lot {
 
   // 拍品更新时间，Unix 毫秒。
   int64 updated_at_unix_ms = 35;
+
+  // 运营配置版本。创建时为 1，每次开拍前配置变更单调递增。
+  int64 config_version = 36;
+
+  // 直播展示态版本。信任卡揭示、对决等展示动作独立递增，不参与 Redis 运行态裁决版本。
+  int64 presentation_version = 37;
 }
 
 // ============================================================================
@@ -782,9 +813,10 @@ message RoomPresence {
   int64 server_time_unix_ms = 5;
 }
 
-// AuctionEvent 表示直播间实时事件。
+// AuctionEvent 表示服务内部的直播间状态变更信号。
 //
-// WebSocket 广播统一使用该结构。不同事件只填对应载荷字段。
+// 该结构可用于进程内/NATS触发完整状态重建，但不得直接作为WebSocket线协议；
+// WebSocket只能发送realtime.proto中的RealtimeEnvelopeV1。
 message AuctionEvent {
   // 事件 ID。
   string id = 1;
@@ -824,6 +856,18 @@ message AuctionEvent {
 
   // 所属主账号 ID。后台事件查询使用该字段做业务数据隔离，观众端无需展示。
   string main_account_id = 13;
+
+  // 订单可见性通知对应的买家 ID；只用于内部 NATS READY 信号。
+  string buyer_user_id = 14;
+
+  // 订单可见性通知对应的确定性订单 ID。
+  string order_id = 15;
+
+  // 订单投影是否已经可查询；运行时成交信号保持 CREATING，domain-relay 只发送 READY。
+  OrderVisibility order_visibility = 16;
+
+  // 订单可见性通知对应的拍品版本。
+  int64 lot_version = 17;
 }
 
 // ============================================================================
@@ -1125,6 +1169,9 @@ message AuctionOrderSummary {
   int64 updated_at_unix_ms = 17;
   int64 expires_at_unix_ms = 18;
   int64 paid_at_unix_ms = 19;
+  string shop_name = 20;
+  string enrichment_status = 21;
+  int64 enrichment_updated_at_unix_ms = 22;
 }
 
 message AuctionBidRecord {
@@ -1442,6 +1489,45 @@ message BuyerConsultReply {
 
   // 是否使用系统兜底逻辑。
   bool fallback_used = 5;
+
+  // 统一返回头。
+  ReplyResult result = 99;
+}
+
+// OrderVisibility 描述异步投影订单当前是否可查询。
+enum OrderVisibility {
+  ORDER_VISIBILITY_UNSPECIFIED = 0;
+  ORDER_VISIBILITY_NONE = 1;
+  ORDER_VISIBILITY_CREATING = 2;
+  ORDER_VISIBILITY_READY = 3;
+}
+
+// RoomPersonalState 表示当前登录用户在同一拍品版本上的私有覆盖。
+message RoomPersonalState {
+  string user_id = 1;
+  string lot_id = 2;
+  int64 lot_version = 3;
+  optional int32 your_rank = 4;
+  optional int64 your_amount_fen = 5;
+  bool you_are_leading = 6;
+  optional string your_order_id = 7;
+  OrderVisibility order_visibility = 8;
+  bool tombstone = 9;
+}
+
+// GetRoomPersonalStateRequest 表示获取当前买家房间私有状态请求。
+message GetRoomPersonalStateRequest {
+  // 直播间 ID。
+  string room_id = 1;
+}
+
+// GetRoomPersonalStateReply 表示当前买家在权威房间版本上的私有覆盖。
+message GetRoomPersonalStateReply {
+  // 仅包含当前登录用户可见的私有状态。
+  RoomPersonalState personal_state = 1;
+
+  // 订单仍在异步投影时建议再次查询的等待时间；否则为 0。
+  int64 retry_after_ms = 2;
 
   // 统一返回头。
   ReplyResult result = 99;

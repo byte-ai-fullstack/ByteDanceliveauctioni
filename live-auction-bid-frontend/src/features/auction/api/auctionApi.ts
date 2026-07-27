@@ -1,9 +1,9 @@
 import { apiRequest } from '../../../shared/api/httpClient';
 import { toQueryString } from '../../../shared/api/query';
-import { assertOkResult, normalizeAuctionEvent, publicResultMessage } from '../../../shared/api/result';
-import { normalizeLot, normalizeRoom, normalizeRoomPresence, normalizeRoomSnapshot, normalizeTrustRevealCard, normalizeUploadedAsset } from '../../../shared/api/normalizers';
+import { assertOkResult, publicResultMessage } from '../../../shared/api/result';
+import { normalizeLot, normalizeRoom, normalizeRoomSnapshot, normalizeTrustRevealCard, normalizeUploadedAsset } from '../../../shared/api/normalizers';
 import { clientLog, createRequestId } from '../../../shared/lib/clientLogger';
-import type { AuctionEvent, CancelLotReply, CreateLotReply, CreateLotRequest, GetRoomPresenceReply, GetRoomSnapshotReply, ListLotsReply, ListRoomEventsReply, ListRoomsReply, Lot, LotStatus, PatchLotDraftRequest, PatchLotDraftReply, QueueLotReply, ReplyResult, RevealTrustCardReply, Room, RoomPresence, RoomSnapshot, SettleLotReply, StartDuelReply, StartLotReply, TrustRevealCard, UploadedAsset, UploadImageReply } from '../../../shared/api/types';
+import type { AdminLotsReply, CancelLotReply, CreateLotReply, CreateLotRequest, GetRoomSnapshotReply, ListRoomsReply, Lot, LotStatus, PatchLotDraftRequest, PatchLotDraftReply, QueueLotReply, RevealTrustCardReply, Room, RoomSnapshot, SettleLotReply, StartDuelReply, StartLotReply, TrustRevealCard, UploadedAsset, UploadImageReply } from '../../../shared/api/types';
 
 export type AdminLotsQuery = {
   page?: number;
@@ -21,33 +21,12 @@ export type AdminLotsPage = {
   pageSize: number;
 };
 
-type AdminLotsReply = {
-  result?: ReplyResult;
-  lots?: unknown[];
-  total?: number | string;
-  page?: number | string;
-  pageSize?: number | string;
-};
-
-export type RoomEventsPage = {
-  events: AuctionEvent[];
-  nextPageToken: string;
-};
-
-export async function listAdminRooms(): Promise<Room[]> {
+export async function listAdminRooms(options: { signal?: AbortSignal } = {}): Promise<Room[]> {
   const reply = assertOkResult(await apiRequest<ListRoomsReply>({
     path: '/api/admin/rooms',
     method: 'GET',
     operation: 'admin-list-rooms',
-  }));
-  return requireArray(reply.rooms, 'rooms').map(normalizeRoom);
-}
-
-export async function listPublicRooms(): Promise<Room[]> {
-  const reply = assertOkResult(await apiRequest<ListRoomsReply>({
-    path: '/api/rooms',
-    method: 'GET',
-    operation: 'list-public-rooms',
+    signal: options.signal,
   }));
   return requireArray(reply.rooms, 'rooms').map(normalizeRoom);
 }
@@ -72,16 +51,7 @@ function requiredValue<T>(value: T | undefined | null, field: string): T {
   return value;
 }
 
-export async function listLots(roomId: string): Promise<Lot[]> {
-  const reply = assertOkResult(await apiRequest<ListLotsReply>({
-    path: `/api/lots?room_id=${encodeURIComponent(roomId)}`,
-    method: 'GET',
-    operation: 'list-lots',
-  }));
-  return requireArray(reply.lots as unknown[] | undefined, 'lots').map(normalizeLot);
-}
-
-export async function listAdminLots(query: AdminLotsQuery = {}): Promise<AdminLotsPage> {
+export async function listAdminLots(query: AdminLotsQuery = {}, signal?: AbortSignal): Promise<AdminLotsPage> {
   const page = query.page ?? 1;
   const pageSize = query.pageSize ?? 20;
   const reply = assertOkResult(await apiRequest<AdminLotsReply>({
@@ -95,6 +65,7 @@ export async function listAdminLots(query: AdminLotsQuery = {}): Promise<AdminLo
     })}`,
     method: 'GET',
     operation: 'admin-list-lots',
+    signal,
   }));
   return {
     lots: requireArray(reply.lots, 'lots').map(normalizeLot),
@@ -104,41 +75,15 @@ export async function listAdminLots(query: AdminLotsQuery = {}): Promise<AdminLo
   };
 }
 
-export async function getRoomSnapshot(roomId: string): Promise<RoomSnapshot> {
+export async function getRoomSnapshot(roomId: string, signal?: AbortSignal): Promise<RoomSnapshot> {
   const reply = assertOkResult(await apiRequest<GetRoomSnapshotReply>({
     path: `/api/rooms/${encodeURIComponent(roomId)}/snapshot`,
     method: 'GET',
     operation: 'room-snapshot',
+    signal,
   }));
   if (!reply.snapshot) throw new Error('response missing snapshot');
   return normalizeRoomSnapshot(reply.snapshot);
-}
-
-export async function getRoomPresence(roomId: string): Promise<RoomPresence> {
-  const reply = assertOkResult(await apiRequest<GetRoomPresenceReply>({
-    path: `/api/rooms/${encodeURIComponent(roomId)}/presence`,
-    method: 'GET',
-    operation: 'room-presence',
-  }));
-  if (!reply.presence) throw new Error('response missing presence');
-  const presence = normalizeRoomPresence(reply.presence);
-  return presence;
-}
-
-export async function listRoomEvents(roomId: string, input: { pageSize?: number; pageToken?: string } = {}): Promise<RoomEventsPage> {
-  const reply = assertOkResult(await apiRequest<ListRoomEventsReply>({
-    path: `/api/rooms/${encodeURIComponent(roomId)}/events${toQueryString({
-      page_size: input.pageSize ?? 12,
-      page_token: input.pageToken,
-    })}`,
-    method: 'GET',
-    operation: 'room-events',
-  }));
-  const raw = reply as ListRoomEventsReply & { next_page_token?: string };
-  return {
-    events: requireArray(reply.events, 'events').map((event) => normalizeAuctionEvent(event)),
-    nextPageToken: String(reply.nextPageToken ?? raw.next_page_token ?? ''),
-  };
 }
 
 export async function uploadImage(file: File, input?: { roomId?: string; bizType?: string }): Promise<UploadedAsset> {
@@ -213,10 +158,6 @@ export async function deleteUploadedImage(assetId: string, options?: { keepalive
   clientLog('info', 'upload_image.deleted', { requestId, assetId });
 }
 
-export async function createLot(payload: CreateLotRequest) {
-  return requireLot(assertOkResult(await apiRequest<CreateLotReply>({ path: '/api/lots', method: 'POST', body: payload, operation: 'create-lot' })));
-}
-
 export async function createDraftLot(payload: Partial<CreateLotRequest> = {}) {
   return requireLot(assertOkResult(await apiRequest<CreateLotReply>({ path: '/api/lots/drafts', method: 'POST', body: payload, operation: 'create-draft-lot' })));
 }
@@ -233,9 +174,8 @@ export async function patchDraftLot(lotId: string, payload: Partial<CreateLotReq
 export async function queueLot(lotId: string) {
   const reply = assertOkResult(await apiRequest<QueueLotReply>({ path: `/api/lots/${lotId}/queue`, method: 'POST', body: { lotId }, operation: 'queue-lot' }));
   if (!reply.lot) throw new Error('response missing lot');
-  const raw = reply as QueueLotReply & { queue_position?: number };
   const lot = normalizeLot(reply.lot);
-  return { lot, queuePosition: raw.queuePosition ?? raw.queue_position ?? lot.queuePosition } as { lot: Lot; queuePosition?: number };
+  return { lot, queuePosition: reply.queuePosition ?? lot.queuePosition } as { lot: Lot; queuePosition?: number };
 }
 
 export async function startLot(lotId: string) {
@@ -249,9 +189,8 @@ export async function revealTrustCard(lotId: string, cardId: string) {
     body: {},
     operation: 'reveal-trust-card',
   }));
-  const raw = reply as RevealTrustCardReply & { trust_card?: unknown };
-  if (!reply.lot || (!reply.trustCard && !raw.trust_card)) throw new Error('response missing lot or trust card');
-  return { lot: normalizeLot(reply.lot), trustCard: normalizeTrustRevealCard(reply.trustCard ?? raw.trust_card) } as { lot: Lot; trustCard: TrustRevealCard };
+  if (!reply.lot || !reply.trustCard) throw new Error('response missing lot or trust card');
+  return { lot: normalizeLot(reply.lot), trustCard: normalizeTrustRevealCard(reply.trustCard) } as { lot: Lot; trustCard: TrustRevealCard };
 }
 
 export async function startDuel(lotId: string) {

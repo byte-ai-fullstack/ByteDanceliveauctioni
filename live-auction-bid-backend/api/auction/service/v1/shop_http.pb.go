@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-http v2.9.2
 // - protoc             v4.25.8
-// source: api/auction/service/v1/shop.proto
+// source: auction/service/v1/shop.proto
 
 package v1
 

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'mysqldump %s\n' "$*" >>"$MYSQL_FAKE_LOG"
+[[ "$*" == *"--single-transaction"* ]]
+[[ "$*" == *"--set-gtid-purged=OFF"* ]]
+printf '%s\n' 'CREATE TABLE restored_fixture (id BIGINT PRIMARY KEY);'

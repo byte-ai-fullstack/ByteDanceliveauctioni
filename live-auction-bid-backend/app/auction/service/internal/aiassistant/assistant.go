@@ -142,6 +142,15 @@ func NewFromEnv(getenv func(string) string) *Assistant {
 	return assistant
 }
 
+// Mode reports the bounded runtime behavior used by the assistant. A provider
+// that is absent or not fully configured follows the deterministic mock path.
+func (a *Assistant) Mode() string {
+	if a != nil && a.configured() {
+		return "external"
+	}
+	return "mock"
+}
+
 func (a *Assistant) ConsultBuyer(
 	ctx context.Context,
 	req BuyerConsultRequest,
@@ -238,7 +247,7 @@ func (a *Assistant) chatJSONWithTemperature(ctx context.Context, system string, 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
 		return err

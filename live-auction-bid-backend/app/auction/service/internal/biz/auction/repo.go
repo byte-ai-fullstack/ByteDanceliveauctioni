@@ -12,17 +12,28 @@ import (
 // LotRepository 管理拍品聚合持久化。
 // biz 只依赖接口，不关心内存、MySQL 或其他存储实现。
 type LotRepository interface {
-	Create(ctx context.Context, lot *v1.Lot, ownerUserID string, events []v1.AuctionEvent) error
-	Save(ctx context.Context, lot *v1.Lot, expectedVersion int64, events []v1.AuctionEvent) error
-	QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerUserID string, nowMs int64) (*v1.Lot, int32, []v1.AuctionEvent, error)
-	StartLotAsOnlyActive(ctx context.Context, lot *v1.Lot, expectedVersion int64, events []v1.AuctionEvent) error
+	Create(ctx context.Context, lot *v1.Lot, ownerUserID string, events []*v1.AuctionEvent) error
+	Save(ctx context.Context, lot *v1.Lot, expectedVersion int64, events []*v1.AuctionEvent) error
+	QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerUserID string, nowMs int64) (*v1.Lot, int32, []*v1.AuctionEvent, error)
 	AttachAssets(ctx context.Context, ownerUserID string, lot *v1.Lot) error
 	FindByID(ctx context.Context, lotID string) (*v1.Lot, error)
 	FindCoreByID(ctx context.Context, lotID string) (*v1.Lot, error)
 	List(ctx context.Context, roomID string, status v1.LotStatus) ([]*v1.Lot, error)
 	ListLots(ctx context.Context, query LotQuery) (LotList, error)
-	FindOrCreateRoomState(ctx context.Context, roomID, mainAccountID string, nowMs int64) (*RoomState, error)
-	RepairRoomActiveLot(ctx context.Context, roomID, activeLotID string, nowMs int64) error
+	FindRoomState(ctx context.Context, roomID, mainAccountID string) (*RoomState, error)
+}
+
+// LotBatchRepository is a read-only capability used after search candidate retrieval.
+// Implementations must preserve input order and hydrate all IDs without per-lot queries.
+type LotBatchRepository interface {
+	FindByIDs(ctx context.Context, lotIDs []string) ([]*v1.Lot, error)
+}
+
+// LotPresentationRepository persists live presentation state independently
+// from auction_lots.version. Redis Lua and Projector remain the only writers
+// of the adjudication version and runtime columns.
+type LotPresentationRepository interface {
+	SaveLotPresentation(ctx context.Context, lot *v1.Lot, expectedPresentationVersion int64, events []*v1.AuctionEvent) error
 }
 
 type RoomRepository interface {
@@ -31,19 +42,14 @@ type RoomRepository interface {
 	FindRoomByID(ctx context.Context, roomID string) (*Room, bool, error)
 }
 
-type ExpiredLotRepository interface {
-	ListExpiredOpen(ctx context.Context, nowMs int64, limit int) ([]*v1.Lot, error)
-	ListStalePreStart(ctx context.Context, nowMs, localDayStartMs int64, limit int) ([]*v1.Lot, error)
-}
-
-// BidRepository 管理出价流水和幂等记录。
-// 持久幂等键随 CommitAcceptedBid 进入 MySQL 事务；CacheIdempotencyKey 只预热 Redis 缓存，不能成为用户级成功/失败边界。
+// BidRepository reads the Kafka-projected bid history and optionally warms the
+// Redis replay cache. It never commits an accepted bid; Redis Lua owns that
+// decision and Projector owns its MySQL transaction.
 type BidRepository interface {
-	CommitAcceptedBid(ctx context.Context, bid v1.Bid, lot *v1.Lot, expectedLotVersion int64, idempotencyKey string, order *Order, events []v1.AuctionEvent) error
-	ListByLot(ctx context.Context, lotID string) ([]v1.Bid, error)
+	ListByLot(ctx context.Context, lotID string) ([]*v1.Bid, error)
 	ListBidRecordsByBuyer(ctx context.Context, buyerUserID string, query BidRecordQuery) (BidRecordList, error)
-	FindByIdempotencyKey(ctx context.Context, lotID, userID, key string) (v1.Bid, bool, error)
-	CacheIdempotencyKey(ctx context.Context, lotID, userID, key string, bid v1.Bid)
+	FindByIdempotencyKey(ctx context.Context, lotID, userID, key string) (*v1.Bid, bool, error)
+	CacheIdempotencyKey(ctx context.Context, lotID, userID, key string, bid *v1.Bid)
 }
 
 type RuntimeBidResult struct {
@@ -55,7 +61,6 @@ type RuntimeBidResult struct {
 	EndsBeforeBid      int64
 	ExtendCountBefore  int32
 	RuntimeEventID     string
-	RuntimeStreamID    string
 	PreviousLotVersion int64
 	LotVersion         int64
 	OrderID            string
@@ -131,49 +136,36 @@ func (e *RuntimeBidRejectError) Lot(lotID string, fallbackAmount *v1.Money) *v1.
 	return lot
 }
 
-type RuntimeProjectionEvent struct {
-	RuntimeEventID          string
-	RuntimeStreamID         string
-	RoomID                  string
-	LotID                   string
-	EventType               string
-	IdempotencyKey          string
-	Bid                     v1.Bid
-	Lot                     *v1.Lot
-	Ranking                 []*v1.RankingItem
-	PreviousLeaderID        string
-	EndsBeforeBid           int64
-	ExtendCountBefore       int32
-	PreviousLotVersion      int64
-	LotVersion              int64
-	OccurredAtUnixMs        int64
-	OrderID                 string
-	ShippingAddressID       string
-	ShippingAddressSnapshot *shop.DeliveryAddressSnapshot
-}
-
-type RuntimeProjectionOutcome struct {
-	Projected        bool
-	AlreadyProjected bool
-	Gap              bool
-	Conflict         bool
-}
-
 type AuctionRuntime interface {
-	HydrateLotRuntime(ctx context.Context, lot *v1.Lot) error
-	SyncLotRuntime(ctx context.Context, lot *v1.Lot) error
-	CancelLotRuntime(ctx context.Context, lot *v1.Lot, reason, operatorID string, nowMs int64) (*v1.Lot, []*v1.RankingItem, error)
+	ActiveRuntimeLotID(ctx context.Context, roomID string) (lotID string, found bool, err error)
 	PlaceBidRuntime(ctx context.Context, lot *v1.Lot, req *v1.PlaceBidRequest, bidderID, nickname, avatarURL, bidID string, nowMs int64) (RuntimeBidResult, error)
 	SnapshotRuntime(ctx context.Context, current *v1.Lot) (*v1.RoomSnapshot, error)
 	RankingRuntime(ctx context.Context, lotID string, limit int64) ([]*v1.RankingItem, error)
 }
 
-type RuntimeProjectionRepository interface {
-	ProjectRuntimeBid(ctx context.Context, bid v1.Bid, lot *v1.Lot, idempotencyKey string, order *Order, events []v1.AuctionEvent) error
+// AuctionRuntimeDisplay separates the lot shown in snapshots from the lot that
+// is still allowed to accept commands. Terminal commands release the active
+// pointer but retain this display pointer for bounded recovery.
+type AuctionRuntimeDisplay interface {
+	DisplayedRuntimeLotID(ctx context.Context, roomID string) (lotID string, found bool, err error)
+}
+
+// RuntimeCommandRepository is the clean-cut lifecycle path whose accepted results are projected through Kafka.
+type RuntimeCommandRepository interface {
+	ExecuteStartLot(ctx context.Context, lot *v1.Lot, traceID string) (RuntimeStartResult, error)
+	ExecuteCancelLot(ctx context.Context, lotID, reason, operatorID, traceID string) (*v1.RuntimeFactV1, error)
+	ExecuteCloseIfExpired(ctx context.Context, lotID, orderID, traceID string) (*v1.RuntimeFactV1, error)
+	ExecuteSyncLotConfig(ctx context.Context, lot *v1.Lot, expectedConfigVersion int64, traceID string) (*v1.RuntimeFactV1, error)
+}
+
+// RuntimeStartResult binds the exact MySQL configuration row serialized by
+// the start command to the Redis fact produced while that row lock was held.
+type RuntimeStartResult struct {
+	SourceLot *v1.Lot
+	Fact      *v1.RuntimeFactV1
 }
 
 type OrderRepository interface {
-	CreateOrderForSettledLot(ctx context.Context, order Order, lot *v1.Lot, expectedLotVersion int64, events []v1.AuctionEvent) error
 	FindOrderByID(ctx context.Context, orderID string) (*Order, error)
 	FindOrderByLot(ctx context.Context, lotID string) (*Order, bool, error)
 	ListOrdersByBuyer(ctx context.Context, buyerUserID string) ([]Order, error)
@@ -182,7 +174,7 @@ type OrderRepository interface {
 
 type PaymentRepository interface {
 	FindPaymentByIdempotencyKey(ctx context.Context, orderID, key string) (*Payment, bool, error)
-	CommitPaymentSuccess(ctx context.Context, payment Payment, order Order, expectedOrderVersion int64, events []v1.AuctionEvent) error
+	CommitPaymentSuccess(ctx context.Context, payment Payment, order Order, expectedOrderVersion int64, events []*v1.AuctionEvent) error
 }
 
 type DepositRepository interface {
@@ -198,11 +190,11 @@ type DeliveryAddressRepository interface {
 // EventRepository 持久化不伴随聚合状态更新的领域事件。
 // 伴随 lot/bid 状态变化的事件必须随对应 repository 方法进入同一个 MySQL 事务。
 type EventRepository interface {
-	PersistEvents(ctx context.Context, events []v1.AuctionEvent) error
+	PersistEvents(ctx context.Context, events []*v1.AuctionEvent) error
 	ListRoomEvents(ctx context.Context, query RoomEventQuery) (RoomEventList, error)
 }
 
 // EventPublisher 发布领域事件。
 type EventPublisher interface {
-	Publish(ctx context.Context, event v1.AuctionEvent) error
+	Publish(ctx context.Context, event *v1.AuctionEvent) error
 }

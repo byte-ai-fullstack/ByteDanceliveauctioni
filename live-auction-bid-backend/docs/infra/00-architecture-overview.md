@@ -29,7 +29,7 @@
 ## 可变点
 
 - RPC 框架可用 Kratos、grpc-go、Connect、Gin+gRPC 等替换。
-- 注册中心可用 Consul
+- 服务发现优先使用部署平台原生 DNS；本地用 Docker DNS，生产用 Kubernetes Service DNS
 - 数据层可按服务选择 GORM
 - 配置中心可用 Apollo
 - 观测系统可接 Prometheus

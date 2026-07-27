@@ -20,13 +20,14 @@ export type ApiRequestOptions = {
   requestId?: string;
   headers?: HeadersInit;
   retryAuth?: boolean;
+  signal?: AbortSignal;
 };
 
 type ParsedResponse<T> =
   | { ok: true; data: T; result?: Partial<ReplyResult>; requestId: string; status: number }
   | { ok: false; error: Error; result?: Partial<ReplyResult>; requestId: string; status: number; authExpired: boolean; authRefreshable: boolean };
 
-export class HttpError extends Error {
+class HttpError extends Error {
   readonly status: number;
   readonly requestId: string;
 
@@ -38,7 +39,7 @@ export class HttpError extends Error {
   }
 }
 
-export class ApiResultError extends Error {
+class ApiResultError extends Error {
   readonly result: Partial<ReplyResult>;
   readonly requestId: string;
 
@@ -50,7 +51,7 @@ export class ApiResultError extends Error {
   }
 }
 
-export class AuthExpiredError extends Error {
+class AuthExpiredError extends Error {
   readonly requestId: string;
 
   constructor(message: string, requestId: string) {
@@ -119,6 +120,7 @@ async function sendOnce<T>(options: ApiRequestOptions, token: string | null, req
     headers,
     body,
     keepalive: options.keepalive,
+    signal: options.signal,
   });
   const bodyData = await parseBody<T & { result?: Partial<ReplyResult> }>(response);
   const result = typeof bodyData === 'object' && bodyData ? bodyData.result : undefined;

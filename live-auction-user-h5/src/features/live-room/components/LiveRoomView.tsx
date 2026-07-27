@@ -1,6 +1,6 @@
 import { type CSSProperties, type TouchEvent, type WheelEvent, useEffect, useRef, useState } from 'react';
 import { LivePlayer } from '../../live/components/LivePlayer';
-import { resolveInitialLiveSource, resolveLivePlaylist } from '../../live/hooks/useLivePlayer';
+import { resolveLivePlaylist } from '../../live/hooks/useLivePlayer';
 import { DepositPayModal } from '../../payment-flow/components/DepositPayModal';
 import { MockPayModal } from '../../payment-flow/components/MockPayModal';
 import { ResultModal } from '../../result-modal/components/ResultModal';
@@ -144,7 +144,7 @@ function LiveRoomChrome({ controller, onCloseRoom }: { controller: LiveRoomContr
     return {
       id: viewer.userId || `viewer-${index}`,
       name,
-      avatarUrl: liveAvatarFor(`${room.roomId}:${name}`, index + 1),
+      avatarUrl: viewer.avatarUrl || liveAvatarFor(`${room.roomId}:${name}`, index + 1),
     };
   }) : [
     { id: 'fallback-buyer', name: '拍友', avatarUrl: liveAvatarFor(`${room.roomId}:buyer`, 1) },
@@ -208,7 +208,11 @@ type LeaderboardEntry = LiveRoomController['ranking'][number];
 function uniqueLeaderboardEntries(entries: LeaderboardEntry[]): LeaderboardEntry[] {
   const byBidder = new Map<string, LeaderboardEntry>();
   entries.forEach((entry, index) => {
-    const key = entry.isMe ? 'me' : entry.userId || entry.nickname || `rank-${index}`;
+    const key = entry.userId
+      ? `user:${entry.userId}`
+      : entry.nickname
+        ? `public:${entry.rank || index + 1}:${entry.nickname}:${moneyNumber(entry.amount)}`
+        : `rank:${entry.rank || index + 1}:${moneyNumber(entry.amount)}`;
     const existing = byBidder.get(key);
     if (!existing || moneyNumber(entry.amount) > moneyNumber(existing.amount)) byBidder.set(key, entry);
   });
@@ -391,9 +395,11 @@ function LiveProductFloatCard({
   if (currentLotDisplayState(controller) !== 'live') return null;
 
   const price = liveProductPrice(currentLot);
-  const leaderName = currentLot.leadingNickname || currentLot.leadingUserId || '';
+  const leaderEntry = uniqueLeaderboardEntries(controller.ranking)[0];
+  const leaderName = leaderEntry?.nickname || currentLot.leadingNickname || currentLot.leadingUserId || '';
   const leaderText = leaderName ? `${firstNameChar(leaderName)}**领先` : '等你领先';
   const leaderAvatarKey = leaderName || currentLot.id;
+  const leaderAvatarUrl = leaderEntry?.avatarUrl || liveAvatarFor(`${room.roomId}:${leaderAvatarKey}:float-leader`);
 
   return (
     <aside className="liveProductFloatCard" aria-label="当前讲解商品">
@@ -413,7 +419,7 @@ function LiveProductFloatCard({
             <b>{compactFloatPrice(price)}</b>
           </span>
           <span className="liveProductFloatLeader">
-            <span><AvatarMedia src={liveAvatarFor(`${room.roomId}:${leaderAvatarKey}:float-leader`)} name={leaderText} /></span>
+            <span><AvatarMedia src={leaderAvatarUrl} name={leaderText} /></span>
             <b>{leaderText}</b>
           </span>
           <span className="liveProductFloatBidCta">去出价</span>
@@ -872,7 +878,11 @@ type LiveRoomViewProps = {
   onCloseRoom?: () => void;
 };
 
-export function LiveRoomView({
+export function LiveRoomView(props: LiveRoomViewProps) {
+  return <LiveRoomViewContent key={props.controller.roomId} {...props} />;
+}
+
+function LiveRoomViewContent({
   controller,
   hasRoomSwipeTargets = false,
   previousRoom,
@@ -886,7 +896,7 @@ export function LiveRoomView({
   const [leaderboardCollapsed, setLeaderboardCollapsed] = useState(false);
   const [closedProductCardLotId, setClosedProductCardLotId] = useState<string | null>(null);
   const [detailLotId, setDetailLotId] = useState<string | null>(null);
-  const [liveSource, setLiveSource] = useState(resolveInitialLiveSource);
+  const [handledOverlayResetKey, setHandledOverlayResetKey] = useState('');
   const roomSwipeStart = useRef<{ x: number; y: number; at: number } | null>(null);
   const roomWheelGesture = useRef({ x: 0, y: 0, lastAt: 0, lockedUntil: 0 });
   const roomSwipeSettleDirection = useRef<RoomSwipeDirection | 0>(0);
@@ -909,7 +919,21 @@ export function LiveRoomView({
     depositPrompt,
     actions,
   } = controller;
+  const overlayResetKey = resultLot?.id
+    ? `result:${resultLot.id}`
+    : depositPrompt?.lot.id
+      ? `deposit:${depositPrompt.lot.id}`
+      : '';
+  if (overlayResetKey !== handledOverlayResetKey) {
+    setHandledOverlayResetKey(overlayResetKey);
+    if (overlayResetKey) {
+      setActiveSheet(null);
+      setClearScreen(false);
+      setDetailLotId(null);
+    }
+  }
   const openCurrentAuction = () => actions.openAuctionPanel('current');
+  const liveSource = room.snapshot?.liveSourceUrl || livePreviewSourceFor(room.roomId || roomName);
   const openLotDetail = (lot: Lot) => {
     setActiveSheet(null);
     setClearScreen(false);
@@ -935,31 +959,6 @@ export function LiveRoomView({
   const detailLot = detailLotId ? detailLotCandidates.find((lot) => lot.id === detailLotId) || null : null;
   const detailVisible = Boolean(detailLot);
   const roomSwipeLocked = Boolean(activeSheet || auctionPanel.open || resultLot || payOrder || depositPrompt || detailVisible);
-
-  useEffect(() => {
-    if (!resultLot) return;
-    setActiveSheet(null);
-    setClearScreen(false);
-    setDetailLotId(null);
-  }, [resultLot]);
-
-  useEffect(() => {
-    if (!depositPrompt) return;
-    setActiveSheet(null);
-    setClearScreen(false);
-    actions.closeAuctionPanel();
-    if (controller.bidAuthPanelOpen) actions.closeBuyerAuthPanel();
-  }, [depositPrompt?.lot.id]);
-
-  useEffect(() => {
-    if (roomSwipeSettleTimer.current) window.clearTimeout(roomSwipeSettleTimer.current);
-    roomSwipeSettleTimer.current = null;
-    roomSwipeSettleDirection.current = 0;
-    roomSwipeStart.current = null;
-    setDetailLotId(null);
-    setRoomSwipeOffset(0);
-    setRoomSwipePhase('idle');
-  }, [controller.roomId]);
 
   useEffect(() => () => {
     if (roomSwipeSettleTimer.current) window.clearTimeout(roomSwipeSettleTimer.current);
@@ -1115,7 +1114,9 @@ export function LiveRoomView({
             wsState={wsState}
             roomName={roomName}
             source={liveSource}
-            onSourceChange={setLiveSource}
+            liveStartedAtUnixMs={room.snapshot?.liveStartedAtUnixMs}
+            serverTimeUnixMs={room.serverTimeUnixMs}
+            serverTimeReceivedAtUnixMs={room.serverTimeReceivedAtUnixMs}
           />
 
           {clearScreen ? (

@@ -148,6 +148,7 @@ export type User = {
   id: string;
   username: string;
   nickname?: string;
+  avatarUrl?: string;
   roleCodes: RoleCode[];
   permissionCodes: PermissionCode[];
   mainAccountId: string;
@@ -243,6 +244,7 @@ export type BidEvent = {
   lotId?: string;
   userId: string;
   nickname?: string;
+  avatarUrl?: string;
   amount: Money;
   accepted?: boolean;
   rejectReason?: string;
@@ -282,6 +284,8 @@ export type RoomSnapshot = {
   roomId: string;
   roomName?: string;
   anchorName?: string;
+  liveSourceUrl?: string;
+  liveStartedAtUnixMs?: number | string;
   onlineCount?: number;
   serverTimeUnixMs?: number | string;
   currentLot?: Lot | null;

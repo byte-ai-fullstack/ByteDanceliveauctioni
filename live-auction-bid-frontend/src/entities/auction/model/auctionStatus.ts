@@ -7,7 +7,7 @@ const ORDER_PAYMENT_WINDOW_MS = 30 * 60 * 1000;
 
 export type AuctionUiStatus = '今日队列' | '草稿' | '准备中' | '待开拍' | '竞拍中' | '延时中' | '已落锤' | '已取消' | '异常' | '历史拍品';
 
-export const LOT_STATUS_FILTERS: Array<{ label: string; value: LotStatus | '' }> = [
+const LOT_STATUS_FILTERS: Array<{ label: string; value: LotStatus | '' }> = [
   { label: '全部状态', value: '' },
   { label: '草稿', value: 'LOT_STATUS_DRAFT' },
   { label: '准备中', value: 'LOT_STATUS_READY' },
@@ -30,12 +30,6 @@ export const HISTORY_LOT_STATUS_FILTERS: Array<{ label: string; value: LotStatus
   { label: '已落锤', value: 'LOT_STATUS_SETTLED' },
   { label: '已取消', value: 'LOT_STATUS_CANCELLED' },
   { label: '异常', value: 'LOT_STATUS_FAILED' },
-];
-
-export const LIBRARY_LOT_STATUS_FILTERS: Array<{ label: string; value: LotStatus | '' }> = [
-  { label: '全部资产', value: '' },
-  { label: '草稿', value: 'LOT_STATUS_DRAFT' },
-  { label: '准备中', value: 'LOT_STATUS_READY' },
 ];
 
 const lotStatusMeta: Record<string, { label: string; tone: StudioTone; ui: AuctionUiStatus }> = {
@@ -87,10 +81,6 @@ export function isPreStartCancellableLot(lot: Pick<Lot, 'status'>) {
   return lot.status === 'LOT_STATUS_DRAFT'
     || lot.status === 'LOT_STATUS_READY'
     || lot.status === 'LOT_STATUS_QUEUED';
-}
-
-export function isRemovedFromCurrentQueueLot(lot: Pick<Lot, 'status'>) {
-  return lot.status === 'LOT_STATUS_CANCELLED' || lot.status === 'LOT_STATUS_FAILED';
 }
 
 function lotPaymentWindowPassed(lot: Pick<Lot, 'settledAtUnixMs'>, order?: Pick<OrderSummary, 'expiresAtUnixMs'> | null, nowMs = Date.now()) {

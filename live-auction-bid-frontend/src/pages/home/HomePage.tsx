@@ -1,5 +1,5 @@
-import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { ArrowRight, BarChart3, Gavel, Heart, Scale, ShieldCheck, ShoppingBag, Store, Users } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowRight, BarChart3, Gavel, Heart, ShieldCheck, ShoppingBag, Store, Users } from 'lucide-react';
 import { readLocalJson } from '../../shared/auth/authStorage';
 
 type SoftParticle = {
@@ -88,33 +88,49 @@ function CountUpStatValue({
   duration?: number;
   delay?: number;
 }) {
+  const parts = parseCountUpValue(value);
+  const reduceMotion = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!parts || reduceMotion) {
+    return <strong aria-label={value}>{value}</strong>;
+  }
+
+  return (
+    <AnimatedCountUpStatValue
+      key={`${value}:${duration}:${delay}`}
+      value={value}
+      parts={parts}
+      duration={duration}
+      delay={delay}
+    />
+  );
+}
+
+function AnimatedCountUpStatValue({
+  value,
+  parts,
+  duration,
+  delay,
+}: {
+  value: string;
+  parts: CountUpParts;
+  duration: number;
+  delay: number;
+}) {
   const ref = useRef<HTMLElement | null>(null);
-  const initialParts = parseCountUpValue(value);
-  const [displayValue, setDisplayValue] = useState(() => (initialParts ? formatCountUpValue(initialParts, 0) : value));
+  const { prefix, suffix, target } = parts;
+  const [displayValue, setDisplayValue] = useState(() => formatCountUpValue(parts, 0));
 
   useEffect(() => {
-    const parts = parseCountUpValue(value);
-    if (!parts) {
-      setDisplayValue(value);
-      return undefined;
-    }
-
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reduceMotion) {
-      setDisplayValue(value);
-      return undefined;
-    }
-
+    const currentParts = { prefix, suffix, target };
     let animationFrame = 0;
     let delayTimer = 0;
     let observer: IntersectionObserver | null = null;
     let started = false;
-    setDisplayValue(formatCountUpValue(parts, 0));
 
     const animate = (startTime: number) => {
       const tick = (now: number) => {
         const progress = Math.min((now - startTime) / duration, 1);
-        setDisplayValue(formatCountUpValue(parts, parts.target * easeOutCubic(progress)));
+        setDisplayValue(formatCountUpValue(currentParts, target * easeOutCubic(progress)));
         if (progress < 1) {
           animationFrame = window.requestAnimationFrame(tick);
           return;
@@ -148,7 +164,7 @@ function CountUpStatValue({
       window.clearTimeout(delayTimer);
       window.cancelAnimationFrame(animationFrame);
     };
-  }, [delay, duration, value]);
+  }, [delay, duration, prefix, suffix, target, value]);
 
   return <strong ref={ref} aria-label={value}>{displayValue}</strong>;
 }
@@ -709,25 +725,6 @@ function RandomMiniBidField() {
           {group.bids.map((bid, index) => <span key={`${group.id}-${index}`} style={{ '--bubble-index': index } as React.CSSProperties}>{bid}</span>)}
         </div>
       ))}
-    </div>
-  );
-}
-
-function FloatingProductCard({ className, title, price, icon }: { className: string; title: string; price: string; icon: ReactNode }) {
-  return (
-    <div className={`floatBizCard productFloat ${className}`}>
-      <div className="productThumb">{icon}</div>
-      <span>{title}</span>
-      <b>{price}</b>
-    </div>
-  );
-}
-
-function FloatingIcon({ className, children, label }: { className: string; children: ReactNode; label?: string }) {
-  return (
-    <div className={`floatingSoftIcon ${className}`}>
-      <i>{children}</i>
-      {label ? <span>{label}</span> : null}
     </div>
   );
 }

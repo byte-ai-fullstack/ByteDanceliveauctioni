@@ -1,0 +1,11 @@
+version: v2
+plugins:
+  - local:
+      - go
+      - run
+      - google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0
+    out: api
+    opt:
+      - paths=source_relative
+inputs:
+  - directory: api

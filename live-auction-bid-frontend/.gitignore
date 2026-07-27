@@ -10,6 +10,8 @@ dist/
 *.tar.gz
 *.zip
 coverage/
+playwright-report/
+test-results/
 .codex/
 .agents/
 .codegraph/

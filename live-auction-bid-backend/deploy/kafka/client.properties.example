@@ -1,0 +1,9 @@
+# Mount this file through Secret/CSI; never commit the rendered file.
+bootstrap.servers=kafka-1:9092,kafka-2:9092,kafka-3:9092
+client.id=auction-outbox-relay
+security.protocol=SASL_SSL
+sasl.mechanism=SCRAM-SHA-512
+sasl.username=REPLACE_ME
+sasl.password=REPLACE_ME
+ssl.ca.location=/var/run/secrets/kafka/ca.pem
+ssl.server.name=kafka.internal

@@ -14,7 +14,7 @@ import (
 	"live-auction-bid/backend/app/auction/service/internal/pkg/apperr"
 )
 
-func (s *Store) QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerUserID string, nowMs int64) (*v1.Lot, int32, []v1.AuctionEvent, error) {
+func (s *Store) QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerUserID string, nowMs int64) (*v1.Lot, int32, []*v1.AuctionEvent, error) {
 	lotID = strings.TrimSpace(lotID)
 	mainAccountID = strings.TrimSpace(mainAccountID)
 	if lotID == "" {
@@ -29,7 +29,7 @@ func (s *Store) QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerU
 
 	var queuedLot *v1.Lot
 	var queuePosition int32
-	var events []v1.AuctionEvent
+	var events []*v1.AuctionEvent
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var current AuctionLotModel
 		if err := tx.WithContext(ctx).
@@ -43,6 +43,9 @@ func (s *Store) QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerU
 		}
 		if current.MainAccountID != mainAccountID {
 			return apperr.ErrPermissionDenied
+		}
+		if err := s.ensureRuntimeStateAbsentForPreStartUpdate(ctx, lotID); err != nil {
+			return err
 		}
 		if current.RoomID == "" {
 			return errors.New("room id is required")
@@ -84,9 +87,7 @@ func (s *Store) QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerU
 		result := tx.WithContext(ctx).
 			Model(&AuctionLotModel{}).
 			Where("id = ? AND version = ?", lot.GetId(), current.Version).
-			Select("*").
-			Omit("created_at").
-			Updates(model)
+			Updates(queueLotUpdateColumns(model))
 		if result.Error != nil {
 			return mapQueuePositionConflict(result.Error)
 		}
@@ -110,130 +111,47 @@ func (s *Store) QueueLotAsNext(ctx context.Context, lotID, mainAccountID, ownerU
 			return err
 		}
 		event := auction.NewAuctionEvent(v1.AuctionEventType_AUCTION_EVENT_TYPE_LOT_QUEUED, lot)
-		events = []v1.AuctionEvent{event}
+		events = []*v1.AuctionEvent{event}
 		if err := createEventModels(ctx, tx, events); err != nil {
 			return err
 		}
-		lot.UpdatedAtUnixMs = time.Now().UnixMilli()
+		lot.UpdatedAtUnixMs = nowMs
+		if err := appendPreStartLotStateOutbox(ctx, tx, lot, nowMs); err != nil {
+			return err
+		}
 		queuedLot = lot
 		return nil
 	}); err != nil {
 		return nil, 0, nil, err
 	}
-	if err := s.streamEvents(ctx, events); err != nil {
-		return nil, 0, nil, err
-	}
 	return queuedLot, queuePosition, events, nil
 }
 
-func (s *Store) StartLotAsOnlyActive(ctx context.Context, lot *v1.Lot, expectedVersion int64, events []v1.AuctionEvent) error {
-	if lot == nil {
-		return errors.New("lot is required")
+func queueLotUpdateColumns(model *AuctionLotModel) map[string]any {
+	return map[string]any{
+		"status":               model.Status,
+		"queue_status":         model.QueueStatus,
+		"queue_position":       model.QueuePosition,
+		"current_price_amount": model.CurrentPriceAmount,
+		"final_price_amount":   model.FinalPriceAmount,
+		"version":              model.Version,
+		"payload":              model.Payload,
 	}
-	if expectedVersion <= 0 {
-		return errors.New("lot expected version is required")
-	}
-	model, err := lotToModel(lot)
-	if err != nil {
-		return err
-	}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := ensureRoomStateRecord(ctx, tx, lot.GetRoomId(), lot.GetMainAccountId(), lot.GetStartedAtUnixMs()); err != nil {
-			return err
-		}
-		var state AuctionRoomStateModel
-		if err := tx.WithContext(ctx).
-			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("room_id = ?", lot.GetRoomId()).
-			First(&state).Error; err != nil {
-			return err
-		}
-		if err := clearStaleOrRejectActiveLot(ctx, tx, &state, lot.GetId()); err != nil {
-			return err
-		}
-
-		var current AuctionLotModel
-		if err := tx.WithContext(ctx).
-			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ?", lot.GetId()).
-			First(&current).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return apperr.ErrNotFound
-			}
-			return err
-		}
-		if current.MainAccountID != lot.GetMainAccountId() {
-			return apperr.ErrPermissionDenied
-		}
-		if current.RoomID != lot.GetRoomId() {
-			return fmtInvalidRoomState()
-		}
-		if current.Version != expectedVersion {
-			return apperr.ErrLotVersionConflict
-		}
-		if current.Status != int32(v1.LotStatus_LOT_STATUS_DRAFT) && current.Status != int32(v1.LotStatus_LOT_STATUS_QUEUED) {
-			return fmtInvalidLotStartStatus(v1.LotStatus(current.Status))
-		}
-
-		result := tx.WithContext(ctx).
-			Model(&AuctionLotModel{}).
-			Where("id = ? AND version = ?", lot.GetId(), expectedVersion).
-			Select("*").
-			Omit("created_at").
-			Updates(model)
-		if result.Error != nil {
-			return mapActiveLotConflict(result.Error)
-		}
-		if result.RowsAffected == 0 {
-			return apperr.ErrLotVersionConflict
-		}
-		if err := tx.WithContext(ctx).
-			Model(&AuctionRoomStateModel{}).
-			Where("room_id = ?", lot.GetRoomId()).
-			Updates(map[string]any{
-				"main_account_id":    lot.GetMainAccountId(),
-				"active_lot_id":      lot.GetId(),
-				"active_lot_version": lot.GetVersion(),
-				"updated_at_unix_ms": lot.GetStartedAtUnixMs(),
-			}).Error; err != nil {
-			return err
-		}
-		lot.UpdatedAtUnixMs = time.Now().UnixMilli()
-		return createEventModels(ctx, tx, events)
-	}); err != nil {
-		return err
-	}
-	return s.streamEvents(ctx, events)
 }
 
-func (s *Store) FindOrCreateRoomState(ctx context.Context, roomID, mainAccountID string, nowMs int64) (*auction.RoomState, error) {
-	if err := ensureRoomStateRecord(ctx, s.db, roomID, mainAccountID, nowMs); err != nil {
-		return nil, err
+func (s *Store) FindRoomState(ctx context.Context, roomID, mainAccountID string) (*auction.RoomState, error) {
+	roomID = strings.TrimSpace(roomID)
+	mainAccountID = strings.TrimSpace(mainAccountID)
+	if roomID == "" || mainAccountID == "" {
+		return nil, fmt.Errorf("%w: room id and main account id are required", apperr.ErrInvalidArgument)
 	}
 	var model AuctionRoomStateModel
-	if err := s.db.WithContext(ctx).Where("room_id = ?", strings.TrimSpace(roomID)).First(&model).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("room_id = ? AND main_account_id = ?", roomID, mainAccountID).First(&model).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return &auction.RoomState{RoomID: roomID, MainAccountID: mainAccountID, NextQueuePosition: 1}, nil
+	} else if err != nil {
 		return nil, err
 	}
 	return roomStateFromModel(&model), nil
-}
-
-func (s *Store) RepairRoomActiveLot(ctx context.Context, roomID, activeLotID string, nowMs int64) error {
-	roomID = strings.TrimSpace(roomID)
-	activeLotID = strings.TrimSpace(activeLotID)
-	if roomID == "" || activeLotID == "" {
-		return nil
-	}
-	if nowMs <= 0 {
-		nowMs = time.Now().UnixMilli()
-	}
-	return s.db.WithContext(ctx).
-		Model(&AuctionRoomStateModel{}).
-		Where("room_id = ? AND active_lot_id = ?", roomID, activeLotID).
-		Updates(map[string]any{
-			"active_lot_id":      "",
-			"active_lot_version": int64(0),
-			"updated_at_unix_ms": nowMs,
-		}).Error
 }
 
 func ensureRoomStateRecord(ctx context.Context, db *gorm.DB, roomID, mainAccountID string, nowMs int64) error {
@@ -252,75 +170,11 @@ func ensureRoomStateRecord(ctx context.Context, db *gorm.DB, roomID, mainAccount
 		RoomID:            roomID,
 		MainAccountID:     mainAccountID,
 		ActiveLotID:       "",
+		DisplayLotID:      "",
 		ActiveLotVersion:  0,
 		NextQueuePosition: 1,
 		UpdatedAtUnixMs:   nowMs,
 	}).Error
-}
-
-func clearStaleOrRejectActiveLot(ctx context.Context, tx *gorm.DB, state *AuctionRoomStateModel, startingLotID string) error {
-	if state == nil || strings.TrimSpace(state.ActiveLotID) == "" {
-		return nil
-	}
-	if state.ActiveLotID == startingLotID {
-		return apperr.ErrRoomActiveLotExists
-	}
-	var active AuctionLotModel
-	if err := tx.WithContext(ctx).
-		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("id = ?", state.ActiveLotID).
-		First(&active).Error; err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-	} else if auction.IsAuctionOpenStatus(v1.LotStatus(active.Status)) {
-		return apperr.ErrRoomActiveLotExists
-	}
-	return tx.WithContext(ctx).
-		Model(&AuctionRoomStateModel{}).
-		Where("room_id = ? AND active_lot_id = ?", state.RoomID, state.ActiveLotID).
-		Updates(map[string]any{
-			"active_lot_id":      "",
-			"active_lot_version": int64(0),
-			"updated_at_unix_ms": time.Now().UnixMilli(),
-		}).Error
-}
-
-func releaseActiveLotIfTerminal(ctx context.Context, tx *gorm.DB, lot *v1.Lot) error {
-	if lot == nil || !isTerminalLotStatus(lot.GetStatus()) || lot.GetRoomId() == "" || lot.GetId() == "" {
-		return nil
-	}
-	return tx.WithContext(ctx).
-		Model(&AuctionRoomStateModel{}).
-		Where("room_id = ? AND active_lot_id = ?", lot.GetRoomId(), lot.GetId()).
-		Updates(map[string]any{
-			"active_lot_id":      "",
-			"active_lot_version": int64(0),
-			"updated_at_unix_ms": time.Now().UnixMilli(),
-		}).Error
-}
-
-func lockRoomStateForTerminalLot(ctx context.Context, tx *gorm.DB, lot *v1.Lot) error {
-	if lot == nil || !isTerminalLotStatus(lot.GetStatus()) || lot.GetRoomId() == "" || lot.GetMainAccountId() == "" {
-		return nil
-	}
-	if err := ensureRoomStateRecord(ctx, tx, lot.GetRoomId(), lot.GetMainAccountId(), time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	var state AuctionRoomStateModel
-	return tx.WithContext(ctx).
-		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("room_id = ?", lot.GetRoomId()).
-		First(&state).Error
-}
-
-func isTerminalLotStatus(status v1.LotStatus) bool {
-	switch status {
-	case v1.LotStatus_LOT_STATUS_SETTLED, v1.LotStatus_LOT_STATUS_CANCELLED, v1.LotStatus_LOT_STATUS_FAILED:
-		return true
-	default:
-		return false
-	}
 }
 
 func roomStateFromModel(model *AuctionRoomStateModel) *auction.RoomState {
@@ -331,21 +185,11 @@ func roomStateFromModel(model *AuctionRoomStateModel) *auction.RoomState {
 		RoomID:            model.RoomID,
 		MainAccountID:     model.MainAccountID,
 		ActiveLotID:       model.ActiveLotID,
+		DisplayLotID:      model.DisplayLotID,
 		ActiveLotVersion:  model.ActiveLotVersion,
 		NextQueuePosition: model.NextQueuePosition,
 		UpdatedAtUnixMs:   model.UpdatedAtUnixMs,
 	}
-}
-
-func mapActiveLotConflict(err error) error {
-	if err == nil {
-		return nil
-	}
-	message := err.Error()
-	if strings.Contains(message, "uidx_one_active_lot_per_room") || strings.Contains(message, "active_room_key") {
-		return apperr.ErrRoomActiveLotExists
-	}
-	return err
 }
 
 func mapQueuePositionConflict(err error) error {
@@ -357,12 +201,4 @@ func mapQueuePositionConflict(err error) error {
 		return apperr.ErrQueuePositionConflict
 	}
 	return err
-}
-
-func fmtInvalidLotStartStatus(status v1.LotStatus) error {
-	return fmt.Errorf("%w: only draft or queued lot can be started, current status: %s", apperr.ErrInvalidArgument, status)
-}
-
-func fmtInvalidRoomState() error {
-	return fmt.Errorf("%w: lot room changed while starting", apperr.ErrInvalidArgument)
 }

@@ -17,13 +17,19 @@ P0 硬点：0 元起拍、固定加价、封顶价自动成交、10-30 秒自动
 ## 已落地的主链路
 
 - 核心业务：创建拍品、开拍、出价、排行榜、信任卡揭示、Duel、落锤、快照、WebSocket 事件广播。
-- 数据主路径：GORM + MySQL 保存拍品、出价和持久幂等键；Redis 缓存出价幂等查询，缓存失败后以 MySQL 记录为准。
-- 本地基础设施：Docker Compose 启动 backend / MySQL / Redis / Consul。
-- 服务注册：启动时向 Consul 注册 `auction-backend`，使用 `/readyz` 作为 Consul HTTP health check。
-- 事件流：伴随拍品/出价状态变更的领域事件与业务状态写入同一个 MySQL 事务；事务提交后写 Redis Stream，Stream 写入确认/错误回写 MySQL，后台 outbox worker 会重推未确认事件。
+- 数据主路径：MySQL/GORM 保存管理态与已确认业务投影；竞拍期间 Redis 保存权威运行态、排行榜、幂等记录、到期索引和原子 List Outbox，Kafka Projector 异步落库。Redis 不可用时拒绝裁决，不回退到 MySQL 直写运行态。
+- 本地基础设施：Docker Compose 独立启动 gateway、auction-service、outbox-relay、projector、domain-relay、enrichment-consumer、index-es、index-pgvector、close-worker、MySQL、Redis、Kafka、NATS 等目标依赖；检索消费者通过 `search` profile 启用。
+- 服务边界：gateway 只对外提供 HTTP/WebSocket；开拍、出价、信任卡揭示、对决、落槌、取消等直播命令全部经私有 gRPC 同步调用 auction-service。开拍、出价、落槌、取消由 Redis Lua 原子裁决；信任卡和对决写独立展示态版本，不推进运行态版本。开拍会在 MySQL 拍品行锁内重新读取配置并执行短 Redis 命令，草稿修改和排队持同一行锁且先确认 runtime 不存在，避免旧配置开拍与异步投影版本分叉。反狙击延时属于出价 Lua 的同一次裁决，不存在独立 RPC 竞态。gateway 不保留本地命令 fallback，缺少或无法连接 auction-service 时拒绝就绪。
+- 服务发现：本地使用 Docker DNS，生产使用 Kubernetes Service DNS；gateway 通过 `auction-service:19090` 访问无状态 auction-service 副本，不维护静态实例清单或房间所有权。auction-service 使用独立的 `:18086/readyz` 运维探针。
+- 事件流：生命周期和出价由 Redis Lua 原子裁决并把运行事实写入 Redis List Outbox；独立 Relay 投递 Kafka，Projector 以 inbox + DB offset 事务投影 MySQL，再由 MySQL Domain Outbox 发布领域事件；订单 enrichment 消费者按 `message_id + payload_hash` 幂等补全地址和店铺快照。
+- 向量检索写入：`index-pgvector` 独立消费 `auction.lot.state.v1`，按 `lot_version + last_event_id + content_hash` 拒绝同版本冲突；价格和状态变化复用既有向量，只有稳定检索内容或模型身份变化才重新调用 Embedding。gateway 只读 pgvector，不再轮询 MySQL 或执行搜索 DDL。
+- 关键词检索写入：`index-es` 使用独立 Kafka group 消费同一 LotState 事件，通过 `version_type=external` 严格按 `lot_version` 写入 `auction-lots-current`；旧版本跳过、完全重复确认后提交、同版本不同事件身份进入 DLQ。索引和 alias 由部署任务初始化，应用启动不会创建或修改 mapping。
+- 混合检索读取：gateway 并行执行 Elasticsearch 关键词召回与 pgvector 语义召回，用 RRF 融合候选；最终以一次 MySQL 批量读取和一次 Redis pipeline 覆盖运行态，再执行公开性、状态和房间过滤。任一检索器故障时使用另一侧，两侧不可用或权威回源失败时降级到 MySQL 过滤路径。
+- 检索重建：MySQL 管理态的创建、编辑、排队与 Redis 运行态共用事务性 Domain Outbox 发布完整 `lot.state`；`auction-search-rebuild` 按 Kafka 水位 + MySQL 一致性快照重建版本化 ES 索引或 pgvector 表。ES 原子切换 alias；pgvector 优先复用相同 hash 的旧向量，在付费调用硬上限内补齐后原子换表。操作步骤见 [`docs/SEARCH_REBUILD_RUNBOOK.md`](docs/SEARCH_REBUILD_RUNBOOK.md)。
+- 检索对账：`search-reconciler` 按主键游标持续抽样 MySQL 与 ES/pgvector 的 `lot_version + last_event_id + content_hash`；缺失或落后时仅重发已验证的原始 `lot.state` Kafka 记录，让两个独立消费者自行幂等修复；同版本分叉或索引超前只写 P0 finding 并告警，绝不强制覆盖。操作步骤见 [`docs/SEARCH_RECONCILIATION_RUNBOOK.md`](docs/SEARCH_RECONCILIATION_RUNBOOK.md)。
 - 用户系统：自建 username/password 账号，用户 ID 使用雪花字符串；JWT access token + refresh session 支持注册、登录、刷新、登出、me 和 RBAC 团队账号管理。
 - 鉴权权限：公开读接口可匿名访问；出价走 `bid.place`，后台操作按 `lot.*`、`auction.control`、`order.manage`、`team.user.*` 等权限码判断，不再使用旧角色枚举做运行时鉴权。
-- 健康检查：`/healthz` 存活检查，`/readyz` 检查 MySQL + Redis、事件 outbox worker 最近修复状态、Consul 注册可观测状态。
+- 健康检查：`/healthz` 存活检查，`/readyz` 检查本进程所需依赖和 Redis generation 安全状态；Relay、Projector、Domain Relay 各自提供独立探针。
 - 统一响应：service 对外只用 reply.result 表达业务成功/失败；Go `error` 不再承载可预期业务错误，避免前端同时解析 body 和 transport error。
 
 被替代的 `MemoryStore`、`database/sql` repo、手写 `schema.go` 主路径已删除，不保留 fallback 或双实现开关。
@@ -37,7 +43,9 @@ cp .env.example .env
 docker compose up --build
 ```
 
-服务默认监听：`http://127.0.0.1:18080`。
+Compose 会先运行一次性 `migrate` 服务；只有全部版本化迁移成功后，`auction-service` 和 `gateway` 才会启动。应用进程只读校验迁移版本、名称和校验和，不会在启动时修改表结构。
+
+gateway 默认监听 `http://127.0.0.1:18080`；auction-service 的 gRPC `:19090` 只在 Compose 内网暴露，宿主机仅映射运维探针 `http://127.0.0.1:18086`。本地、性能三副本和分片验证 Compose 都使用同一拆分边界，不再启动兼容单体。
 
 后端默认使用 TOS 作为图片存储。Docker Compose 启动前必须复制 `deploy/.env.example` 为 `deploy/.env` 并填写 TOS 配置；如果 `AUCTION_STORAGE_PROVIDER=tos` 且 endpoint、region、bucket、access key、secret key 任一缺失，Compose 或后端会 fail fast，不会等到 upload 接口才返回 `storage not configured`。
 
@@ -53,27 +61,23 @@ password: main_dev_password
 ```bash
 curl http://127.0.0.1:18080/healthz
 curl http://127.0.0.1:18080/readyz
+curl http://127.0.0.1:18086/readyz
 ```
 
-### 旧数据库 volume 与 migration
+### 目标数据库 migration
 
-全新数据库由 GORM `AutoMigrate` 按当前 model 创建表和索引；如果本地不需要保留旧数据，建议先清理旧 volume 后再启动：
+重构目标库由独立、带版本和校验和的 migrate 命令创建，不接受旧 volume 原地升级：
 
 ```bash
-cd deploy
-docker compose down -v
-docker compose up --build
+export AUCTION_MYSQL_DSN='auction:password@tcp(127.0.0.1:3306)/live_auction?charset=utf8mb4'
+go run ./app/auction/service/cmd/migrate up
+go run ./app/auction/service/cmd/migrate status
+go run ./app/auction/service/cmd/migrate --steps 1 down
 ```
 
-如果继续使用旧 Docker volume，需要手动在 MySQL 中执行以下 migration，完成订单/支付表、出价幂等索引、`auction_bids.idempotency_key NOT NULL` 和 RBAC 全量替换：
+目标 DDL 位于 [`deploy/mysql/migrations`](./deploy/mysql/migrations/README.md)。旧的日期前缀 SQL 仅保留为历史资料，不会被 migrate 命令加载。
 
-```bash
-deploy/mysql/migrations/20260523_audit_fix.sql
-deploy/mysql/migrations/20260523_p3_0_bid_idempotency_required.sql
-deploy/mysql/migrations/20260531_full_rbac_replace.sql
-```
-
-旧库的索引和 `auction_users.role` 删除不会只靠重新启动自动补齐；必须执行 migration 或清库重建。
+L3 运行态已切到 Redis List Outbox → Kafka → Projector，L4b 订单补全由独立 enrichment-consumer 承担。MySQL DDL 只允许通过独立 migrate 命令执行；数据库缺少迁移、存在版本断层、未知版本或校验和漂移时，gateway、auction-service、projector、domain-relay 与 enrichment-consumer 都会拒绝启动。
 
 ### 火山引擎 TOS 图片上传配置
 
@@ -141,9 +145,12 @@ AUCTION_REALTIME_RANKING_LIMIT=50
 需要先启动后端及 MySQL/Redis，然后执行：
 
 ```bash
+PROJECTOR_METRICS_URL=http://127.0.0.1:18083/metrics \
+RELAY_METRICS_URL=http://127.0.0.1:18082/metrics \
 CONCURRENCY=100 node scripts/load-bid-hot-path.mjs
-CONCURRENCY=300 node scripts/load-bid-hot-path.mjs
 ```
+
+Projector、Outbox Relay 与 Gateway 是独立部署单元，脚本强制分别抓取三者的指标；缺少独立 worker 指标或误把 Gateway 指标当投影指标时直接失败，避免把不存在的时间序列当作零积压。
 
 如果本机配置了 HTTP 代理，建议显式绕过 localhost：
 
@@ -155,13 +162,16 @@ NO_PROXY=127.0.0.1,localhost CONCURRENCY=100 node scripts/load-bid-hot-path.mjs
 
 ```env
 BASE_URL=http://127.0.0.1:18080
+GATEWAY_METRICS_URL=http://127.0.0.1:18080/metrics
+PROJECTOR_METRICS_URL=http://127.0.0.1:18083/metrics
+RELAY_METRICS_URL=http://127.0.0.1:18082/metrics
 AUCTION_REALTIME_RANKING_LIMIT=50
 MERCHANT_USERNAME=
 MERCHANT_PASSWORD=
 RUN_ID=
 ```
 
-脚本会创建/复用商家，创建拍品并排队开拍，确认 `/api/rooms` 可见，注册 N 个买家并并发出价，最后报告 `total/accepted/rejected/errors/P50/P95/P99/finalPrice/leader/rankingLength`，并断言最终价与领先者来自最高有效出价、ranking 已排序且长度不超过 TopN、幂等重放不重复生成出价，封顶成交时买家订单只出现一次。
+脚本会创建/复用商家，创建拍品并排队开拍，确认 `/api/rooms` 可见，注册 N 个买家并并发出价，最后报告 `total/accepted/rejected/errors/P50/P95/P99/finalPrice/leader/rankingLength`。它同时从 Relay 等待 Redis Outbox pending/inflight 清空、从 Projector 等待 Kafka lag 清空，并断言成功 ACK 数覆盖本轮有效出价、没有 ACK 队列不变量错误、Projector 未暂停。最终价与领先者必须来自最高有效出价，ranking 已排序且不超过 TopN，幂等重放不得重复生成出价，封顶成交时买家订单只出现一次。
 
 没有本地 MySQL/Redis/HTTP 服务时，可以先跑业务层并发一致性烟测：
 
@@ -178,6 +188,7 @@ go test ./app/auction/service/test -run TestConcurrentBidSmokeMaintainsLeaderRan
 ```bash
 go test ./...
 go build ./app/auction/service/cmd/server
+go build ./app/auction/service/cmd/auction-service
 ```
 
 HTTP 黑盒契约测试位于 `test/e2e`，默认未设置后端地址时会跳过：
@@ -188,6 +199,8 @@ LIVE_AUCTION_E2E_BASE_URL=http://127.0.0.1:18080 go test ./test/e2e -count=1 -v
 ```
 
 详细说明见 [`docs/infra/e2e-contract-tests.md`](docs/infra/e2e-contract-tests.md)。
+
+故障演练不得以“容器重新 healthy”代替数据正确性证明；`scripts/run-fault-injection.sh` 的 before/during/after 业务断言契约见 [`docs/infra/fault-injection.md`](docs/infra/fault-injection.md)。
 
 ## 文档
 
@@ -202,6 +215,6 @@ LIVE_AUCTION_E2E_BASE_URL=http://127.0.0.1:18080 go test ./test/e2e -count=1 -v
 
 - **统一返回模式（Result Envelope）**：service 层把可预期业务错误收敛到 `ReplyResult`，对前端形成单一解析入口；transport error 只留给不可包装的系统/链路故障。
 - **Repository + Unit of Work**：data 层持有 GORM/Redis/事务边界，lot/bid/event 在必要场景进入同一个 MySQL transaction，biz 层只依赖 repo 接口。
-- **Transactional Outbox**：业务状态与事件先在 MySQL 同事务落库，再由 outbox worker 推 Redis Stream，接受 at-least-once，消费侧按 event id 幂等。
-- **Registry + Health Check**：server 层负责 Consul 注册与 `/readyz` 聚合观测，不让治理基础设施进入 biz。
+- **双 Outbox**：Redis Lua 与运行状态同原子操作写 List Outbox，Relay 至少一次投递 Kafka；Projector 与 MySQL 业务投影同事务写 Domain Outbox，消费侧按全局 event ID 幂等。
+- **Platform Discovery + Health Check**：本地 Docker DNS、生产 Kubernetes Service DNS 负责发现；server 层只聚合本进程安全依赖到 `/readyz`，不让治理基础设施进入 biz。
 - **测试隔离**：跨层业务测试保留在 `app/auction/service/test`；HTTP 黑盒契约测试放在 `test/e2e`；同包内部测试只在确需覆盖私有转换、worker、repo、hub 等内部行为时保留。

@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: auction-gateway
+spec:
+  selector: {app.kubernetes.io/name: auction-gateway}
+  ports:
+    - {name: http, port: 18080, targetPort: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auction-service
+spec:
+  selector: {app.kubernetes.io/name: auction-service}
+  ports:
+    - {name: grpc, port: 19090, targetPort: grpc}
+    - {name: operations, port: 18086, targetPort: operations}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: outbox-relay
+spec:
+  selector: {app.kubernetes.io/name: outbox-relay}
+  ports:
+    - {name: operations, port: 18082, targetPort: operations}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: projector
+spec:
+  selector: {app.kubernetes.io/name: projector}
+  ports:
+    - {name: operations, port: 18083, targetPort: operations}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: domain-relay
+spec:
+  selector: {app.kubernetes.io/name: domain-relay}
+  ports:
+    - {name: operations, port: 18084, targetPort: operations}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: enrichment-consumer
+spec:
+  selector: {app.kubernetes.io/name: enrichment-consumer}
+  ports:
+    - {name: operations, port: 18087, targetPort: operations}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: close-worker
+spec:
+  selector: {app.kubernetes.io/name: close-worker}
+  ports:
+    - {name: operations, port: 18085, targetPort: operations}

@@ -2,7 +2,9 @@ package data
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -12,43 +14,71 @@ import (
 	"live-auction-bid/backend/app/auction/service/internal/biz/auction"
 	userbiz "live-auction-bid/backend/app/auction/service/internal/biz/user"
 	"live-auction-bid/backend/app/auction/service/internal/observability"
+	"live-auction-bid/backend/app/auction/service/internal/pkg/apperr"
+	"live-auction-bid/backend/app/auction/service/internal/runtimegeneration"
 )
 
 type Config struct {
-	MySQLDSN                                  string
-	RedisAddr                                 string
-	RedisPassword                             string
-	RuntimeProjectionShards                   int
-	RuntimeProjectionBackpressurePendingLimit int64
-	RuntimeProjectionBackpressureLag          time.Duration
-	DBMaxOpenConns                            int
-	DBMaxIdleConns                            int
-	DBConnMaxLifetime                         time.Duration
-	DBConnMaxIdleTime                         time.Duration
-	RedisPoolSize                             int
-	RedisMinIdleConns                         int
+	MySQLDSN                      string
+	RedisAddr                     string
+	RedisPassword                 string
+	OutboxShards                  int
+	OutboxPendingLimit            int64
+	DBMaxOpenConns                int
+	DBMaxIdleConns                int
+	DBConnMaxLifetime             time.Duration
+	DBConnMaxIdleTime             time.Duration
+	RedisPoolSize                 int
+	RedisMinIdleConns             int
+	RedisClient                   *redis.Client
+	SchemaVerifier                SchemaVerifier
+	RuntimeGenerationGuardEnabled bool
+	RuntimeGenerationPollInterval time.Duration
+	RuntimeReconcileInterval      time.Duration
+}
+
+// SchemaVerifier is owned by the Store consumer so application processes can
+// validate schema state without coupling the data package to a migration source.
+type SchemaVerifier interface {
+	VerifyCurrent(context.Context, *sql.DB) error
+}
+
+// RuntimeAdmissionGate is defined by its command-path consumer. A closed gate
+// rejects only work that can create or enlarge unprojected runtime state.
+type RuntimeAdmissionGate interface {
+	Check(context.Context) error
 }
 
 // Store is the single production data path for the auction service.
 //
 // Persistence rules:
-// - GORM + MySQL owns authoritative lot and bid state.
-// - MySQL keeps accepted bids and durable idempotency keys; Redis caches idempotency lookups.
+// - Redis Lua owns live auction adjudication and runtime state.
+// - Kafka Projector is the only writer of durable runtime lot, bid, and order facts.
+// - GORM handles pre-start metadata, presentation state, and read models only.
 // - There is intentionally no in-memory or database/sql fallback.
 type Store struct {
-	db                                        *gorm.DB
-	redis                                     *redis.Client
-	runtimeProjectionShards                   int
-	runtimeProjectionBackpressurePendingLimit int64
-	runtimeProjectionBackpressureLagMs        int64
+	db                     *gorm.DB
+	redis                  *redis.Client
+	outboxShards           int
+	outboxPendingLimit     int64
+	runtimeGenerationGuard *runtimegeneration.Guard
+	runtimeAdmissionGate   RuntimeAdmissionGate
 }
 
 func NewStore(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.MySQLDSN == "" {
 		return nil, errors.New("mysql dsn is required")
 	}
-	if cfg.RedisAddr == "" {
+	if cfg.RedisClient == nil && cfg.RedisAddr == "" {
 		return nil, errors.New("redis addr is required")
+	}
+	if cfg.SchemaVerifier == nil {
+		return nil, errors.New("schema verifier is required")
+	}
+	var err error
+	cfg.OutboxShards, err = normalizeRuntimeOutboxShardCount(cfg.OutboxShards)
+	if err != nil {
+		return nil, err
 	}
 
 	db, err := gorm.Open(mysql.Open(cfg.MySQLDSN), &gorm.Config{
@@ -81,24 +111,28 @@ func NewStore(ctx context.Context, cfg Config) (*Store, error) {
 		_ = sqlDB.Close()
 		return nil, err
 	}
+	if err := cfg.SchemaVerifier.VerifyCurrent(ctx, sqlDB); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("verify mysql schema: %w", err)
+	}
 
-	redisOptions := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
-	if cfg.RedisPoolSize > 0 {
-		redisOptions.PoolSize = cfg.RedisPoolSize
+	rdb := cfg.RedisClient
+	if rdb == nil {
+		redisOptions := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
+		if cfg.RedisPoolSize > 0 {
+			redisOptions.PoolSize = cfg.RedisPoolSize
+		}
+		if cfg.RedisMinIdleConns > 0 {
+			redisOptions.MinIdleConns = cfg.RedisMinIdleConns
+		}
+		rdb = redis.NewClient(redisOptions)
 	}
-	if cfg.RedisMinIdleConns > 0 {
-		redisOptions.MinIdleConns = cfg.RedisMinIdleConns
-	}
-	rdb := redis.NewClient(redisOptions)
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		_ = sqlDB.Close()
 		_ = rdb.Close()
 		return nil, err
 	}
 
-	if cfg.RuntimeProjectionShards <= 0 {
-		cfg.RuntimeProjectionShards = defaultRuntimeProjectionShards
-	}
 	observability.BindDBStatsProvider(sqlDB.Stats)
 	observability.BindRedisPoolStatsProvider(func() observability.RedisPoolStats {
 		stats := rdb.PoolStats()
@@ -112,17 +146,101 @@ func NewStore(ctx context.Context, cfg Config) (*Store, error) {
 		}
 	})
 	store := &Store{
-		db:                      db,
-		redis:                   rdb,
-		runtimeProjectionShards: cfg.RuntimeProjectionShards,
-		runtimeProjectionBackpressurePendingLimit: cfg.RuntimeProjectionBackpressurePendingLimit,
-		runtimeProjectionBackpressureLagMs:        cfg.RuntimeProjectionBackpressureLag.Milliseconds(),
+		db:                 db,
+		redis:              rdb,
+		outboxShards:       cfg.OutboxShards,
+		outboxPendingLimit: cfg.OutboxPendingLimit,
 	}
-	if err := store.migrate(ctx); err != nil {
-		_ = store.Close()
-		return nil, err
+	if cfg.RuntimeGenerationGuardEnabled {
+		backend, err := runtimegeneration.NewRedisBackend(rdb)
+		if err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		reconciler, err := NewRuntimeReconciler(sqlDB, rdb, cfg.OutboxShards)
+		if err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		guard, err := runtimegeneration.NewGuard(backend, runtimegeneration.Config{
+			PollInterval:   cfg.RuntimeGenerationPollInterval,
+			VerifyInterval: cfg.RuntimeReconcileInterval,
+			Verify:         reconciler.VerifyActive,
+		})
+		if err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		store.runtimeGenerationGuard = guard
+		observability.BindRuntimeGenerationReadyProvider(func() bool { return guard.Status().Ready })
 	}
 	return store, nil
+}
+
+// StartRuntimeGenerationGuard performs the initial reconciliation and keeps
+// retrying in the background even if the initial check leaves the service frozen.
+func (s *Store) StartRuntimeGenerationGuard(ctx context.Context) error {
+	if s == nil || s.runtimeGenerationGuard == nil {
+		return nil
+	}
+	initialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	err := s.runtimeGenerationGuard.Initialize(initialCtx)
+	cancel()
+	go s.runtimeGenerationGuard.Run(ctx)
+	return err
+}
+
+func (s *Store) SignalRedisPrimarySwitch() {
+	if s != nil && s.runtimeGenerationGuard != nil {
+		s.runtimeGenerationGuard.SignalSwitchMaster()
+	}
+}
+
+func (s *Store) RuntimeGenerationStatus() runtimegeneration.Status {
+	if s == nil || s.runtimeGenerationGuard == nil {
+		return runtimegeneration.Status{Ready: true, Reason: "generation guard disabled"}
+	}
+	return s.runtimeGenerationGuard.Status()
+}
+
+// ProjectionGateDB returns the Store-owned SQL pool for the read-only
+// end-to-end projection gate. The caller must not close the returned pool.
+func (s *Store) ProjectionGateDB() (*sql.DB, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("store is not initialized")
+	}
+	return s.db.DB()
+}
+
+func (s *Store) SetRuntimeAdmissionGate(gate RuntimeAdmissionGate) error {
+	if s == nil || gate == nil {
+		return errors.New("store and runtime admission gate are required")
+	}
+	s.runtimeAdmissionGate = gate
+	return nil
+}
+
+func (s *Store) checkRuntimeAdmission(ctx context.Context) error {
+	if s == nil || s.runtimeAdmissionGate == nil {
+		return nil
+	}
+	if err := s.runtimeAdmissionGate.Check(ctx); err != nil {
+		if contextError := ctx.Err(); contextError != nil {
+			return contextError
+		}
+		return fmt.Errorf("%w: retry after the MySQL projection catches up", apperr.ErrOverloaded)
+	}
+	return nil
+}
+
+func normalizeRuntimeOutboxShardCount(value int) (int, error) {
+	if value <= 0 {
+		return RuntimeOutboxShardCount, nil
+	}
+	if value != RuntimeOutboxShardCount {
+		return 0, fmt.Errorf("runtime outbox shard count must be %d", RuntimeOutboxShardCount)
+	}
+	return value, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -136,10 +254,19 @@ func (s *Store) Ping(ctx context.Context) error {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		return err
 	}
-	return s.redis.Ping(ctx).Err()
+	if err := s.redis.Ping(ctx).Err(); err != nil {
+		return err
+	}
+	if s.runtimeGenerationGuard != nil {
+		return s.runtimeGenerationGuard.Ping(ctx)
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
+	if s != nil && s.runtimeGenerationGuard != nil {
+		observability.BindRuntimeGenerationReadyProvider(nil)
+	}
 	if s.redis != nil {
 		_ = s.redis.Close()
 	}
@@ -153,35 +280,10 @@ func (s *Store) Close() error {
 	return sqlDB.Close()
 }
 
-func (s *Store) migrate(ctx context.Context) error {
-	if err := s.db.WithContext(ctx).AutoMigrate(
-		&AuctionRoomModel{},
-		&AuctionRoomStateModel{},
-		&AuctionLotModel{},
-		&AuctionBidModel{},
-		&AuctionLotStatsModel{},
-		&AuctionLotParticipantModel{},
-		&AuctionRuntimeProjectionOffsetModel{},
-		&AuctionRuntimeProjectionShardOffsetModel{},
-		&UserOrderModel{},
-		&UserOrderItemModel{},
-		&UserOrderPaymentModel{},
-		&AuctionDepositHoldModel{},
-		&ShopProductModel{},
-		&ShopSKUModel{},
-		&UserDeliveryAddressModel{},
-		&AuctionEventModel{},
-		&AssetFileModel{},
-		&AuctionUserModel{},
-		&AuctionRoleModel{},
-		&AuctionPermissionModel{},
-		&AuctionUserRoleModel{},
-		&AuctionRolePermissionModel{},
-		&AuctionUserPermissionModel{},
-		&AuctionUserSessionModel{},
-	); err != nil {
-		return err
-	}
+// BootstrapReferenceData applies idempotent reference-data defaults after the
+// versioned schema has been verified. It performs DML only and is owned by the
+// gateway process, not by every process that opens a Store.
+func (s *Store) BootstrapReferenceData(ctx context.Context) error {
 	if err := s.EnsureRBACDefaults(ctx); err != nil {
 		return err
 	}

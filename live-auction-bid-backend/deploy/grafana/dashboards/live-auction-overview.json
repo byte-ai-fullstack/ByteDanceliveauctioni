@@ -740,12 +740,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(auction_worker_lease_active{job=~\"$job\",worker=~\"$worker\"})",
-          "legendFormat": "leases",
+          "expr": "sum(auction_outbox_owner{job=~\"$job\",shard=~\"$outbox_shard\"})",
+          "legendFormat": "owners",
           "refId": "A"
         }
       ],
-      "title": "Worker Leases",
+      "title": "Runtime Outbox Shard Owners",
       "type": "stat"
     },
     {
@@ -1401,8 +1401,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(auction_runtime_event_xadd_total{job=~\"$job\"}[$__rate_interval])",
-          "legendFormat": "runtime xadd/s",
+          "expr": "sum(rate(auction_outbox_ack_result_total{job=~\"$job\",result=\"ok\"}[$__rate_interval]))",
+          "legendFormat": "runtime facts delivered/s",
           "refId": "B"
         },
         {
@@ -1819,12 +1819,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, shard) (rate(auction_projection_batch_duration_ms_bucket{job=~\"$job\"}[$__rate_interval])))",
-          "legendFormat": "p95 shard {{shard}}",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(auction_projection_tx_duration_ms_bucket{job=~\"$job\"}[$__rate_interval])))",
+          "legendFormat": "p95 Kafka projector transaction",
           "refId": "A"
         }
       ],
-      "title": "Projection Batch Duration by Shard",
+      "title": "Kafka Projector Transaction Duration",
       "type": "timeseries"
     },
     {
@@ -1888,12 +1888,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "auction_worker_lease_active{job=~\"$job\",worker=~\"$worker\"}",
-          "legendFormat": "{{worker}}",
+          "expr": "auction_outbox_owner{job=~\"$job\",shard=~\"$outbox_shard\"}",
+          "legendFormat": "shard {{shard}}",
           "refId": "A"
         }
       ],
-      "title": "Worker Lease Active",
+      "title": "Runtime Outbox Ownership",
       "type": "bargauge"
     },
     {
@@ -2894,15 +2894,15 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(auction_worker_lease_active{job=~\"$job\"}, worker)",
+        "definition": "label_values(auction_outbox_owner{job=~\"$job\"}, shard)",
         "hide": 0,
         "includeAll": true,
-        "label": "Worker",
+        "label": "Outbox shard",
         "multi": false,
-        "name": "worker",
+        "name": "outbox_shard",
         "options": [],
         "query": {
-          "query": "label_values(auction_worker_lease_active{job=~\"$job\"}, worker)",
+          "query": "label_values(auction_outbox_owner{job=~\"$job\"}, shard)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

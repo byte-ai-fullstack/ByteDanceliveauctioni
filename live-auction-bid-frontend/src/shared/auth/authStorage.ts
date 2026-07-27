@@ -25,7 +25,7 @@ export function writeLocalJson<T>(key: string, value: T) {
   }
 }
 
-export function removeLocalValue(key: string) {
+function removeLocalValue(key: string) {
   try {
     window.localStorage.removeItem(key);
   } catch {
@@ -48,7 +48,7 @@ export function clearAuthState() {
   window.dispatchEvent(new Event('auth-state-change'));
 }
 
-export function readSessionValue(key: string, fallback = '') {
+function readSessionValue(key: string, fallback = '') {
   try {
     return window.sessionStorage.getItem(key) || fallback;
   } catch {
@@ -56,7 +56,7 @@ export function readSessionValue(key: string, fallback = '') {
   }
 }
 
-export function writeSessionValue(key: string, value: string) {
+function writeSessionValue(key: string, value: string) {
   try {
     window.sessionStorage.setItem(key, value);
   } catch {
@@ -64,7 +64,7 @@ export function writeSessionValue(key: string, value: string) {
   }
 }
 
-export function removeSessionValue(key: string) {
+function removeSessionValue(key: string) {
   try {
     window.sessionStorage.removeItem(key);
   } catch {

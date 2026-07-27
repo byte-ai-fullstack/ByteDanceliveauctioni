@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -56,6 +55,7 @@ func NewLotDraftFromRequest(id string, req *v1.CreateLotRequest, requireComplete
 		CurrentPrice:     currentPrice,
 		FinalPrice:       &v1.Money{Currency: currentPrice.GetCurrency()},
 		Version:          1,
+		ConfigVersion:    1,
 		Stats:            &v1.LotStats{},
 		TrustCards:       trustCards,
 		DuelState:        &v1.DuelState{},
@@ -138,73 +138,83 @@ func ApplyDraftPatch(lot *v1.Lot, req *v1.PatchLotDraftRequest) error {
 	if req == nil {
 		return fmt.Errorf("%w: patch lot draft request is required", apperr.ErrInvalidArgument)
 	}
-	if lot.Status == v1.LotStatus_LOT_STATUS_LIVE || lot.Status == v1.LotStatus_LOT_STATUS_SETTLED || lot.Status == v1.LotStatus_LOT_STATUS_CANCELLED {
+	if !IsPreStartCancellableStatus(lot.GetStatus()) {
 		return fmt.Errorf("%w: only not-started lot can be edited, current status: %s", apperr.ErrInvalidArgument, lot.Status)
 	}
-	if lot.QueueStatus == v1.LotQueueStatus_LOT_QUEUE_STATUS_NEXT {
-		return fmt.Errorf("%w: next lot cannot be edited from add-lot draft page", apperr.ErrInvalidArgument)
+	if lot.QueueStatus != v1.LotQueueStatus_LOT_QUEUE_STATUS_UNSPECIFIED && lot.QueueStatus != v1.LotQueueStatus_LOT_QUEUE_STATUS_NONE {
+		return fmt.Errorf("%w: queued lot must be removed from the queue before editing", apperr.ErrInvalidArgument)
 	}
+	candidate := proto.Clone(lot).(*v1.Lot)
 	if req.GetRoomId() != "" {
-		lot.RoomId = req.GetRoomId()
+		candidate.RoomId = req.GetRoomId()
 	}
 	if req.GetTitle() != "" {
-		lot.Title = req.GetTitle()
+		candidate.Title = req.GetTitle()
 	}
 	if req.GetDescription() != "" {
-		lot.Description = req.GetDescription()
+		candidate.Description = req.GetDescription()
 	}
 	if req.GetImageUrl() != "" {
 		if err := validateHTTPImageURL("imageUrl", req.GetImageUrl()); err != nil {
 			return err
 		}
-		lot.ImageUrl = req.GetImageUrl()
+		candidate.ImageUrl = req.GetImageUrl()
 	}
 	if len(req.GetGalleryImageUrls()) > 0 {
-		lot.GalleryImageUrls = cloneStringSlice(req.GetGalleryImageUrls())
+		candidate.GalleryImageUrls = cloneStringSlice(req.GetGalleryImageUrls())
 	}
 	if req.GetCategory() != "" {
-		lot.Category = req.GetCategory()
+		candidate.Category = req.GetCategory()
 	}
 	if len(req.GetTags()) > 0 {
-		lot.Tags = cloneStringSlice(req.GetTags())
+		candidate.Tags = cloneStringSlice(req.GetTags())
 	}
 	if req.GetEstimatePrice() != nil {
-		lot.EstimatePrice = cloneMoney(req.GetEstimatePrice())
+		candidate.EstimatePrice = cloneMoney(req.GetEstimatePrice())
 	}
 	if req.GetStock() != 0 {
 		stock, err := normalizeStock(req.GetStock())
 		if err != nil {
 			return err
 		}
-		lot.Stock = stock
+		candidate.Stock = stock
 	}
 	if req.GetAfterSaleNotes() != "" {
-		lot.AfterSaleNotes = req.GetAfterSaleNotes()
+		candidate.AfterSaleNotes = req.GetAfterSaleNotes()
 	}
 	if req.GetDepositAmount() != nil {
 		if err := validateOptionalMoney("depositAmount", req.GetDepositAmount()); err != nil {
 			return err
 		}
-		lot.DepositAmount = cloneMoney(req.GetDepositAmount())
+		candidate.DepositAmount = cloneMoney(req.GetDepositAmount())
 	}
 	if req.GetRule() != nil {
-		lot.Rule = cloneRule(req.GetRule())
-		if lot.Rule.GetStartPrice() != nil {
-			lot.CurrentPrice = lot.Rule.GetStartPrice()
-			lot.FinalPrice = &v1.Money{Currency: lot.Rule.GetStartPrice().GetCurrency()}
+		candidate.Rule = cloneRule(req.GetRule())
+		if candidate.Rule.GetStartPrice() != nil {
+			candidate.CurrentPrice = candidate.Rule.GetStartPrice()
+			candidate.FinalPrice = &v1.Money{Currency: candidate.Rule.GetStartPrice().GetCurrency()}
 		}
 	}
 	if len(req.GetTrustCards()) > 0 {
-		lot.TrustCards = cloneTrustCards(req.GetTrustCards())
-		normalizeTrustCards(lot)
+		candidate.TrustCards = cloneTrustCards(req.GetTrustCards())
+		normalizeTrustCards(candidate)
 	}
-	if err := validateLotMedia(lot); err != nil {
+	if err := validateLotMedia(candidate); err != nil {
 		return err
 	}
-	if lot.QueueStatus == v1.LotQueueStatus_LOT_QUEUE_STATUS_UNSPECIFIED {
-		lot.QueueStatus = v1.LotQueueStatus_LOT_QUEUE_STATUS_NONE
+	if candidate.QueueStatus == v1.LotQueueStatus_LOT_QUEUE_STATUS_UNSPECIFIED {
+		candidate.QueueStatus = v1.LotQueueStatus_LOT_QUEUE_STATUS_NONE
 	}
-	lot.Version++
+	if candidate.ConfigVersion <= 0 {
+		candidate.ConfigVersion = 1
+	}
+	if candidate.ConfigVersion >= maxRedisExactInteger {
+		return fmt.Errorf("%w: lot config version is exhausted", apperr.ErrInvalidArgument)
+	}
+	candidate.ConfigVersion++
+	candidate.Version++
+	proto.Reset(lot)
+	proto.Merge(lot, candidate)
 	return nil
 }
 
@@ -212,7 +222,7 @@ func QueueLot(lot *v1.Lot, queuePosition int32) error {
 	if lot == nil {
 		return fmt.Errorf("%w: lot is required", apperr.ErrInvalidArgument)
 	}
-	if lot.Status == v1.LotStatus_LOT_STATUS_LIVE || lot.Status == v1.LotStatus_LOT_STATUS_SETTLED || lot.Status == v1.LotStatus_LOT_STATUS_CANCELLED {
+	if !IsPreStartCancellableStatus(lot.GetStatus()) {
 		return fmt.Errorf("%w: only not-started lot can be queued, current status: %s", apperr.ErrInvalidArgument, lot.Status)
 	}
 	if err := ValidateLotReady(lot.GetTitle(), lot.GetImageUrl(), lot.GetRule()); err != nil {
@@ -234,11 +244,6 @@ func QueueLot(lot *v1.Lot, queuePosition int32) error {
 	lot.FinalPrice = &v1.Money{Currency: lot.GetRule().GetStartPrice().GetCurrency()}
 	lot.Version++
 	return nil
-}
-
-func clearQueueState(lot *v1.Lot) {
-	lot.QueueStatus = v1.LotQueueStatus_LOT_QUEUE_STATUS_NONE
-	lot.QueuePosition = 0
 }
 
 func cloneRule(rule *v1.BidRule) *v1.BidRule {
@@ -355,107 +360,6 @@ func normalizeTrustCards(lot *v1.Lot) {
 	}
 }
 
-func StartLot(lot *v1.Lot, nowMs int64) error {
-	if lot == nil {
-		return fmt.Errorf("%w: lot is required", apperr.ErrInvalidArgument)
-	}
-	if lot.GetRule() == nil || lot.GetRule().GetStartPrice() == nil {
-		return fmt.Errorf("%w: lot bid rule and start price are required", apperr.ErrInvalidArgument)
-	}
-	if lot.Status != v1.LotStatus_LOT_STATUS_DRAFT && lot.Status != v1.LotStatus_LOT_STATUS_QUEUED {
-		return fmt.Errorf("%w: only draft or queued lot can be started, current status: %s", apperr.ErrInvalidArgument, lot.Status)
-	}
-	lot.Status = v1.LotStatus_LOT_STATUS_LIVE
-	clearQueueState(lot)
-	lot.StartedAtUnixMs = nowMs
-	lot.EndsAtUnixMs = nowMs + int64(lot.GetRule().GetDurationSeconds())*1000
-	lot.CurrentPrice = lot.GetRule().GetStartPrice()
-	lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_WARM_UP
-	lot.Version++
-	return nil
-}
-
-func AcceptBid(lot *v1.Lot, bid v1.Bid, nowMs int64) error {
-	if lot == nil {
-		return fmt.Errorf("%w: lot is required", apperr.ErrInvalidArgument)
-	}
-	if lot.GetRule() == nil || lot.GetRule().GetMinIncrement() == nil || lot.GetCurrentPrice() == nil {
-		return fmt.Errorf("%w: lot rule, min increment and current price are required", apperr.ErrInvalidArgument)
-	}
-	if !IsAuctionOpenStatus(lot.Status) {
-		switch lot.Status {
-		case v1.LotStatus_LOT_STATUS_CANCELLED:
-			return apperr.ErrLotCancelled
-		case v1.LotStatus_LOT_STATUS_SETTLED, v1.LotStatus_LOT_STATUS_FAILED:
-			return apperr.ErrBidEnded
-		default:
-			return apperr.ErrBidNotLive
-		}
-	}
-	if lot.EndsAtUnixMs > 0 && nowMs > lot.EndsAtUnixMs {
-		return apperr.ErrBidEnded
-	}
-	if bid.GetAmount() == nil || bid.GetAmount().GetCurrency() == "" {
-		return fmt.Errorf("%w: bid amount and currency are required", apperr.ErrInvalidArgument)
-	}
-	if bid.GetUserId() == "" || bid.GetNickname() == "" {
-		return fmt.Errorf("%w: bid user id and nickname are required", apperr.ErrInvalidArgument)
-	}
-	if bid.GetAmount().GetCurrency() != lot.GetCurrentPrice().GetCurrency() {
-		return apperr.ErrBidCurrencyMismatch
-	}
-	if lot.GetLeadingUserId() != "" && lot.GetLeadingUserId() == bid.GetUserId() {
-		return apperr.ErrBidAlreadyLeading
-	}
-	if bid.GetAmount().GetAmount() < lot.GetCurrentPrice().GetAmount()+lot.GetRule().GetMinIncrement().GetAmount() {
-		return apperr.ErrBidTooLow
-	}
-	lot.CurrentPrice = bid.GetAmount()
-	lot.LeadingUserId = bid.UserId
-	lot.LeadingNickname = bid.Nickname
-	lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_BIDDING_ACTIVE
-	if lot.GetRule().GetCapPrice() != nil {
-		if bid.GetAmount().GetCurrency() != lot.GetRule().GetCapPrice().GetCurrency() {
-			return apperr.ErrBidCurrencyMismatch
-		}
-		if bid.GetAmount().GetAmount() >= lot.GetRule().GetCapPrice().GetAmount() {
-			lot.Status = v1.LotStatus_LOT_STATUS_SETTLED
-			clearQueueState(lot)
-			lot.SettledAtUnixMs = nowMs
-			lot.WinnerUserId = bid.UserId
-			lot.WinnerNickname = bid.Nickname
-			lot.FinalPrice = bid.GetAmount()
-			lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_SETTLE_READY
-			if lot.DuelState != nil {
-				lot.DuelState.Active = false
-			}
-			lot.Version++
-			return nil
-		}
-	}
-
-	remainingMs := lot.EndsAtUnixMs - nowMs
-	windowMs := int64(lot.GetRule().GetAntiSnipeWindowSeconds()) * 1000
-	extendCount := int32(0)
-	if lot.DuelState != nil {
-		extendCount = lot.DuelState.ExtendCount
-	}
-	if remainingMs > 0 && remainingMs <= windowMs && extendCount < lot.GetRule().GetMaxExtendCount() {
-		lot.EndsAtUnixMs += int64(lot.GetRule().GetAntiSnipeExtendSeconds()) * 1000
-		if lot.DuelState == nil {
-			lot.DuelState = &v1.DuelState{LotId: lot.Id, MaxExtendCount: lot.GetRule().GetMaxExtendCount()}
-		}
-		lot.DuelState.ExtendCount++
-		lot.DuelState.LotId = lot.Id
-		lot.DuelState.EndsAtUnixMs = lot.EndsAtUnixMs
-		lot.DuelState.MaxExtendCount = lot.GetRule().GetMaxExtendCount()
-		lot.Status = v1.LotStatus_LOT_STATUS_EXTENDED
-	}
-
-	lot.Version++
-	return nil
-}
-
 func RevealTrustCard(lot *v1.Lot, cardID string, nowMs int64) (*v1.TrustRevealCard, error) {
 	if lot == nil {
 		return nil, fmt.Errorf("%w: lot is required", apperr.ErrInvalidArgument)
@@ -463,12 +367,18 @@ func RevealTrustCard(lot *v1.Lot, cardID string, nowMs int64) (*v1.TrustRevealCa
 	if cardID == "" {
 		return nil, fmt.Errorf("%w: trust card id is required", apperr.ErrInvalidArgument)
 	}
+	if !IsAuctionOpenStatus(lot.GetStatus()) {
+		return nil, fmt.Errorf("%w: trust card can only be revealed for a live lot", apperr.ErrInvalidArgument)
+	}
 	for _, card := range lot.TrustCards {
 		if card.Id == cardID {
+			if card.Revealed {
+				return card, nil
+			}
 			card.Revealed = true
 			card.RevealedAtUnixMs = nowMs
 			lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_TRUST_BLOCKED
-			lot.Version++
+			lot.PresentationVersion++
 			return card, nil
 		}
 	}
@@ -535,62 +445,7 @@ func StartDuel(lot *v1.Lot, ranking []*v1.RankingItem, nowMs int64, userAID, use
 		MaxExtendCount:  lot.GetRule().GetMaxExtendCount(),
 	}
 	lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_DUEL_MODE
-	lot.Version++
-	return nil
-}
-
-func SettleLot(lot *v1.Lot, nowMs int64) error {
-	if lot == nil {
-		return fmt.Errorf("%w: lot is required", apperr.ErrInvalidArgument)
-	}
-	if !IsAuctionOpenStatus(lot.Status) {
-		return fmt.Errorf("%w: only live lot can be settled, current status: %s", apperr.ErrInvalidArgument, lot.Status)
-	}
-	if lot.LeadingUserId == "" {
-		return fmt.Errorf("%w: lot has no accepted bid to settle", apperr.ErrInvalidArgument)
-	}
-	lot.Status = v1.LotStatus_LOT_STATUS_SETTLED
-	clearQueueState(lot)
-	lot.SettledAtUnixMs = nowMs
-	lot.WinnerUserId = lot.LeadingUserId
-	lot.WinnerNickname = lot.LeadingNickname
-	lot.FinalPrice = lot.GetCurrentPrice()
-	lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_SETTLE_READY
-	if lot.DuelState != nil {
-		lot.DuelState.Active = false
-	}
-	lot.Version++
-	return nil
-}
-
-func CancelLot(lot *v1.Lot, reason string, nowMs int64) error {
-	if lot == nil {
-		return fmt.Errorf("%w: lot is required", apperr.ErrInvalidArgument)
-	}
-	switch lot.Status {
-	case v1.LotStatus_LOT_STATUS_DRAFT, v1.LotStatus_LOT_STATUS_READY, v1.LotStatus_LOT_STATUS_QUEUED, v1.LotStatus_LOT_STATUS_LIVE, v1.LotStatus_LOT_STATUS_EXTENDED:
-	case v1.LotStatus_LOT_STATUS_SETTLED:
-		return fmt.Errorf("%w: settled lot cannot be cancelled", apperr.ErrInvalidArgument)
-	case v1.LotStatus_LOT_STATUS_CANCELLED:
-		return fmt.Errorf("%w: lot is already cancelled", apperr.ErrInvalidArgument)
-	case v1.LotStatus_LOT_STATUS_FAILED:
-		return fmt.Errorf("%w: failed lot cannot be cancelled", apperr.ErrInvalidArgument)
-	default:
-		return fmt.Errorf("%w: lot cannot be cancelled, current status: %s", apperr.ErrInvalidArgument, lot.Status)
-	}
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return fmt.Errorf("%w: cancel reason is required", apperr.ErrInvalidArgument)
-	}
-	lot.Status = v1.LotStatus_LOT_STATUS_CANCELLED
-	clearQueueState(lot)
-	lot.CancelReason = reason
-	lot.CancelledAtUnixMs = nowMs
-	lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_UNSPECIFIED
-	if lot.DuelState != nil {
-		lot.DuelState.Active = false
-	}
-	lot.Version++
+	lot.PresentationVersion++
 	return nil
 }
 
@@ -601,59 +456,4 @@ func IsPreStartCancellableStatus(status v1.LotStatus) bool {
 	default:
 		return false
 	}
-}
-
-const stalePreStartLotWindow = 24 * time.Hour
-
-var auctionBusinessLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
-
-func IsAutoCancellablePreStartStatus(status v1.LotStatus) bool {
-	switch status {
-	case v1.LotStatus_LOT_STATUS_READY:
-		return true
-	default:
-		return false
-	}
-}
-
-func IsStalePreStartLot(lot *v1.Lot, nowMs int64) bool {
-	if lot == nil || nowMs <= 0 || lot.GetStartedAtUnixMs() > 0 || !IsAutoCancellablePreStartStatus(lot.GetStatus()) {
-		return false
-	}
-	if lot.GetQueueStatus() == v1.LotQueueStatus_LOT_QUEUE_STATUS_QUEUED || lot.GetQueuePosition() > 0 {
-		return false
-	}
-	createdAtMs := lot.GetCreatedAtUnixMs()
-	if createdAtMs <= 0 || createdAtMs > nowMs {
-		return false
-	}
-	if nowMs-createdAtMs >= stalePreStartLotWindow.Milliseconds() {
-		return true
-	}
-	createdAt := time.UnixMilli(createdAtMs).In(auctionBusinessLocation)
-	now := time.UnixMilli(nowMs).In(auctionBusinessLocation)
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, auctionBusinessLocation)
-	return createdAt.Before(dayStart)
-}
-
-func FailExpiredLot(lot *v1.Lot, reason string, nowMs int64) error {
-	if lot == nil {
-		return fmt.Errorf("%w: lot is required", apperr.ErrInvalidArgument)
-	}
-	if !IsAuctionOpenStatus(lot.Status) {
-		return fmt.Errorf("%w: only live lot can be failed, current status: %s", apperr.ErrInvalidArgument, lot.Status)
-	}
-	if reason == "" {
-		return fmt.Errorf("%w: fail reason is required", apperr.ErrInvalidArgument)
-	}
-	lot.Status = v1.LotStatus_LOT_STATUS_FAILED
-	clearQueueState(lot)
-	lot.CancelReason = reason
-	lot.CancelledAtUnixMs = nowMs
-	lot.PlaybookStage = v1.PlaybookStage_PLAYBOOK_STAGE_SETTLE_READY
-	if lot.DuelState != nil {
-		lot.DuelState.Active = false
-	}
-	lot.Version++
-	return nil
 }

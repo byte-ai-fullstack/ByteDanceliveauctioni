@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	v1 "live-auction-bid/backend/api/auction/service/v1"
@@ -21,7 +22,7 @@ import (
 	httptransport "github.com/go-kratos/kratos/v2/transport/http"
 )
 
-func NewHTTPServer(addr string, auction *appsvc.AuctionService, users *appsvc.UserService, shop *appsvc.ShopService, orders *appsvc.OrderService, hub *realtime.Hub, health HealthChecker, authManager *auth.Manager, authMiddleware middleware.Middleware, imageStorage storage.StorageProvider, assetStore assetStore) *httptransport.Server {
+func NewHTTPServer(addr string, auctionHTTP v1.AuctionServiceHTTPServer, auction *appsvc.AuctionService, users *appsvc.UserService, shop *appsvc.ShopService, orders *appsvc.OrderService, hub *realtime.Hub, health HealthChecker, authManager *auth.Manager, authMiddleware middleware.Middleware, imageStorage storage.StorageProvider, assetStore assetStore) *httptransport.Server {
 	middlewares := []middleware.Middleware{recovery.Recovery()}
 	if authMiddleware != nil {
 		middlewares = append(middlewares, authMiddleware)
@@ -30,20 +31,37 @@ func NewHTTPServer(addr string, auction *appsvc.AuctionService, users *appsvc.Us
 		httptransport.Address(addr),
 		httptransport.Middleware(middlewares...),
 		httptransport.Filter(localDevCORSFilter, requestctx.HTTPMiddleware),
+		httptransport.ResponseEncoder(auctionResponseEncoder),
 		httptransport.ErrorEncoder(resultEnvelopeErrorEncoder),
 	)
 
-	registerAuctionHTTP(srv, auction)
+	registerAuctionHTTP(srv, auctionHTTP)
 	registerShopHTTP(srv, shop, orders, auction)
 	registerUserHTTP(srv, users)
 	registerRealtimeHTTP(srv, hub)
 	registerUploadHTTP(srv, authManager, assetStore, imageStorage)
-	registerOperationHTTP(srv, health)
+	registerOperationHTTP(srv, health, "auction-gateway")
 
 	return srv
 }
 
-func registerAuctionHTTP(srv *httptransport.Server, auction *appsvc.AuctionService) {
+func auctionResponseEncoder(w http.ResponseWriter, r *http.Request, payload any) error {
+	if reply, ok := payload.(*v1.GetRoomPersonalStateReply); ok &&
+		reply.GetResult() != nil && reply.GetResult().GetCode() == 0 &&
+		reply.GetPersonalState().GetOrderVisibility() == v1.OrderVisibility_ORDER_VISIBILITY_CREATING &&
+		reply.GetRetryAfterMs() > 0 {
+		retryAfterMs := reply.GetRetryAfterMs()
+		retryAfterSeconds := retryAfterMs / 1_000
+		if retryAfterMs%1_000 != 0 {
+			retryAfterSeconds++
+		}
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
+		w.WriteHeader(http.StatusAccepted)
+	}
+	return httptransport.DefaultResponseEncoder(w, r, payload)
+}
+
+func registerAuctionHTTP(srv *httptransport.Server, auction v1.AuctionServiceHTTPServer) {
 	v1.RegisterAuctionServiceHTTPServer(srv, auction)
 }
 
@@ -77,7 +95,7 @@ func localDevCORSFilter(next http.Handler) http.Handler {
 			header.Set("Vary", "Origin")
 			header.Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 			header.Set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Request-Id,X-Trace-Id,X-Client-App,X-Client-Version,X-Client-Time,Idempotency-Key")
-			header.Set("Access-Control-Expose-Headers", "X-Request-Id,X-Trace-Id,X-Server-Time")
+			header.Set("Access-Control-Expose-Headers", "X-Request-Id,X-Trace-Id,X-Server-Time,Retry-After")
 			header.Set("Access-Control-Max-Age", "600")
 		}
 		if r.Method == http.MethodOptions {

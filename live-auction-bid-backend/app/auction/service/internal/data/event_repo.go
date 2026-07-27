@@ -5,29 +5,24 @@ import (
 	"errors"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/redis/go-redis/v9"
 	"google.golang.org/protobuf/encoding/protojson"
 	"gorm.io/gorm"
 	v1 "live-auction-bid/backend/api/auction/service/v1"
 	"live-auction-bid/backend/app/auction/service/internal/biz/auction"
 )
 
-func (s *Store) Publish(ctx context.Context, event v1.AuctionEvent) error {
-	return s.PersistEvents(ctx, []v1.AuctionEvent{event})
+func (s *Store) Publish(ctx context.Context, event *v1.AuctionEvent) error {
+	return s.PersistEvents(ctx, []*v1.AuctionEvent{event})
 }
 
-func (s *Store) PersistEvents(ctx context.Context, events []v1.AuctionEvent) error {
+func (s *Store) PersistEvents(ctx context.Context, events []*v1.AuctionEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return createEventModels(ctx, tx, events)
-	}); err != nil {
-		return err
-	}
-	return s.streamEvents(ctx, events)
+	})
 }
 
 func (s *Store) ListRoomEvents(ctx context.Context, query auction.RoomEventQuery) (auction.RoomEventList, error) {
@@ -78,7 +73,7 @@ func (s *Store) ListRoomEvents(ctx context.Context, query auction.RoomEventQuery
 	return auction.RoomEventList{Events: events, NextPageToken: nextPageToken}, nil
 }
 
-func createEventModels(ctx context.Context, tx *gorm.DB, events []v1.AuctionEvent) error {
+func createEventModels(ctx context.Context, tx *gorm.DB, events []*v1.AuctionEvent) error {
 	for _, event := range events {
 		model, err := eventToModel(event)
 		if err != nil {
@@ -91,7 +86,10 @@ func createEventModels(ctx context.Context, tx *gorm.DB, events []v1.AuctionEven
 	return nil
 }
 
-func eventToModel(event v1.AuctionEvent) (*AuctionEventModel, error) {
+func eventToModel(event *v1.AuctionEvent) (*AuctionEventModel, error) {
+	if event == nil {
+		return nil, errors.New("auction event is required")
+	}
 	if event.Id == "" {
 		return nil, errors.New("event id is required")
 	}
@@ -104,7 +102,7 @@ func eventToModel(event v1.AuctionEvent) (*AuctionEventModel, error) {
 	if event.OccurredAtUnixMs == 0 {
 		return nil, errors.New("event occurred time is required")
 	}
-	payload, err := protojson.Marshal(&event)
+	payload, err := protojson.Marshal(event)
 	if err != nil {
 		return nil, err
 	}
@@ -118,103 +116,4 @@ func eventToModel(event v1.AuctionEvent) (*AuctionEventModel, error) {
 		Reason:           event.Reason,
 		Payload:          string(payload),
 	}, nil
-}
-
-func (s *Store) streamEvents(ctx context.Context, events []v1.AuctionEvent) error {
-	for _, event := range events {
-		payload, err := protojson.Marshal(&event)
-		if err != nil {
-			_ = s.markEventStreamError(ctx, event.Id, err)
-			return err
-		}
-		streamID, err := s.writeEventToStream(ctx, event, string(payload))
-		if err != nil {
-			_ = s.markEventStreamError(ctx, event.Id, err)
-			return err
-		}
-		if err := s.markEventStreamed(ctx, event.Id, streamID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) RepairEventStreamOutbox(ctx context.Context, limit int) error {
-	if limit <= 0 {
-		limit = 100
-	}
-	var models []AuctionEventModel
-	if err := s.db.WithContext(ctx).
-		Where("streamed_at_unix_ms = 0").
-		Order("created_at ASC").
-		Order("id ASC").
-		Limit(limit).
-		Find(&models).Error; err != nil {
-		return err
-	}
-	for i := range models {
-		event := v1.AuctionEvent{}
-		if err := protojson.Unmarshal([]byte(models[i].Payload), &event); err != nil {
-			_ = s.markEventStreamError(ctx, models[i].ID, err)
-			return err
-		}
-		streamID, err := s.writeEventToStream(ctx, event, models[i].Payload)
-		if err != nil {
-			_ = s.markEventStreamError(ctx, models[i].ID, err)
-			return err
-		}
-		if err := s.markEventStreamed(ctx, models[i].ID, streamID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) CountPendingEventOutbox(ctx context.Context) (int64, error) {
-	var count int64
-	if err := s.db.WithContext(ctx).
-		Model(&AuctionEventModel{}).
-		Where("streamed_at_unix_ms = 0").
-		Count(&count).Error; err != nil {
-		return 0, err
-	}
-	return count, nil
-}
-
-func (s *Store) writeEventToStream(ctx context.Context, event v1.AuctionEvent, payload string) (string, error) {
-	return s.redis.XAdd(ctx, &redis.XAddArgs{
-		Stream: eventStreamKey(event.RoomId),
-		ID:     "*",
-		Values: map[string]any{
-			"id":                  event.Id,
-			"type":                strconv.Itoa(int(event.Type)),
-			"lot_id":              event.LotId,
-			"occurred_at_unix_ms": strconv.FormatInt(event.OccurredAtUnixMs, 10),
-			"payload":             string(payload),
-		},
-	}).Result()
-}
-
-func (s *Store) markEventStreamed(ctx context.Context, eventID, streamID string) error {
-	return s.db.WithContext(ctx).Model(&AuctionEventModel{}).
-		Where("id = ?", eventID).
-		Updates(map[string]any{
-			"stream_id":           streamID,
-			"streamed_at_unix_ms": time.Now().UnixMilli(),
-			"last_stream_error":   "",
-		}).Error
-}
-
-func (s *Store) markEventStreamError(ctx context.Context, eventID string, err error) error {
-	message := err.Error()
-	if len(message) > 512 {
-		message = message[:512]
-	}
-	return s.db.WithContext(ctx).Model(&AuctionEventModel{}).
-		Where("id = ?", eventID).
-		Updates(map[string]any{"last_stream_error": message}).Error
-}
-
-func eventStreamKey(roomID string) string {
-	return "auction:events:" + roomID
 }

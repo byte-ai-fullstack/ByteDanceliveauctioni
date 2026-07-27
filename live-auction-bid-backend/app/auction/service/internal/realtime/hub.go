@@ -3,37 +3,32 @@ package realtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	auctionbiz "live-auction-bid/backend/app/auction/service/internal/biz/auction"
 	userbiz "live-auction-bid/backend/app/auction/service/internal/biz/user"
 	"live-auction-bid/backend/app/auction/service/internal/observability"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/auth"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/clock"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/idgen"
-	"live-auction-bid/backend/app/auction/service/internal/pkg/requestctx"
 
 	"github.com/gorilla/websocket"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 	v1 "live-auction-bid/backend/api/auction/service/v1"
 )
 
 const (
-	writeTimeout         = 3 * time.Second
-	pingInterval         = 20 * time.Second
-	pongTimeout          = 60 * time.Second
-	connectionSendBuffer = 32
-	roomCoalesceDelay    = 75 * time.Millisecond
+	writeTimeout          = 3 * time.Second
+	pingInterval          = 20 * time.Second
+	heartbeatInterval     = 5 * time.Second
+	pongTimeout           = 60 * time.Second
+	criticalQueueCapacity = 4
+	roomCoalesceDelay     = 75 * time.Millisecond
 )
 
-var eventJSONMarshal = protojson.MarshalOptions{
-	UseEnumNumbers: false,
-	UseProtoNames:  false,
-}
+var ErrHubDraining = errors.New("realtime gateway is draining")
 
 type SnapshotProvider interface {
 	Snapshot(ctx context.Context, roomID string) (*v1.RoomSnapshot, error)
@@ -43,13 +38,24 @@ type RoomAccessValidator interface {
 	ValidateRoomInMainAccount(ctx context.Context, roomID, mainAccountID string) error
 }
 
+type RoomSubscriptionManager interface {
+	RetainRoom(ctx context.Context, roomID string) error
+	ReleaseRoom(roomID string) error
+}
+
 type Hub struct {
-	mu             sync.RWMutex
+	mu             sync.RWMutex // guards rooms and draining
+	subscriptionMu sync.Mutex
 	rooms          map[string]map[*connection]struct{}
+	draining       bool
 	coalesceMu     sync.Mutex
 	coalescedRooms map[string]*coalescedRoomEvents
+	wireMu         sync.Mutex
+	wireRooms      map[string]*roomWireCache
+	readyOrders    map[string]map[string]readyOrderState
 	snapshot       SnapshotProvider
 	roomAccess     RoomAccessValidator
+	roomSubs       RoomSubscriptionManager
 	auth           *auth.Manager
 	config         Config
 	allowedOrigins map[string]struct{}
@@ -58,23 +64,35 @@ type Hub struct {
 }
 
 type coalescedRoomEvents struct {
-	timer  *time.Timer
-	order  []v1.AuctionEventType
-	events map[v1.AuctionEventType]v1.AuctionEvent
+	timer *time.Timer
+	event *v1.AuctionEvent
+}
+
+type roomWireCache struct {
+	lotID           string
+	lotVersion      int64
+	status          v1.LotStatus
+	mainAccountID   string
+	public          *immutablePayload
+	admin           *immutablePayload
+	privateUsers    map[string]struct{}
+	heartbeatBucket int64
+	heartbeat       *immutablePayload
 }
 
 type connection struct {
-	hub       *Hub
-	roomID    string
-	scope     string
-	mu        sync.RWMutex
-	ctx       context.Context
-	authCtx   auth.AuthContext
-	client    requestctx.RequestContext
-	conn      *websocket.Conn
-	send      chan v1.AuctionEvent
-	done      chan struct{}
-	closeOnce sync.Once
+	hub         *Hub
+	roomID      string
+	scope       string
+	mu          sync.RWMutex
+	ctx         context.Context
+	authCtx     auth.AuthContext
+	conn        *websocket.Conn
+	queueMu     sync.Mutex
+	latestState chan *wireBatch
+	critical    chan *criticalFrame
+	done        chan struct{}
+	closeOnce   sync.Once
 }
 
 type clientMessage struct {
@@ -99,6 +117,8 @@ func NewHub(snapshot SnapshotProvider, configs ...Config) *Hub {
 	h := &Hub{
 		rooms:          make(map[string]map[*connection]struct{}),
 		coalescedRooms: make(map[string]*coalescedRoomEvents),
+		wireRooms:      make(map[string]*roomWireCache),
+		readyOrders:    make(map[string]map[string]readyOrderState),
 		snapshot:       snapshot,
 		config:         normalized,
 		allowedOrigins: allowedOrigins,
@@ -120,54 +140,52 @@ func (h *Hub) BindRoomAccessValidator(validator RoomAccessValidator) {
 	h.roomAccess = validator
 }
 
-func (h *Hub) Publish(ctx context.Context, event v1.AuctionEvent) error {
+func (h *Hub) BindRoomSubscriptionManager(manager RoomSubscriptionManager) {
+	h.subscriptionMu.Lock()
+	h.roomSubs = manager
+	h.subscriptionMu.Unlock()
+}
+
+func (h *Hub) Publish(ctx context.Context, event *v1.AuctionEvent) error {
+	if event == nil {
+		return nil
+	}
+	if h.IsDraining() {
+		return nil
+	}
+	if isOrderReadySignal(event) {
+		return h.deliverOrderReady(ctx, event)
+	}
 	if isPrivateRejectEvent(event.GetType()) {
 		observability.RecordWSEventDropped(event.GetType().String())
 		return nil
 	}
 	if isImmediateEvent(event.GetType()) {
-		h.flushCoalescedRoom(event.GetRoomId())
+		h.discardCoalescedRoom(event.GetRoomId(), event.GetLot().GetVersion())
 		return h.deliver(ctx, event)
 	}
-	if isCoalescibleEvent(event.GetType()) && event.GetRoomId() != "" {
+	if event.GetRoomId() != "" && (event.GetLot() != nil || event.GetSnapshot() != nil) {
 		h.enqueueCoalesced(event)
 		return nil
 	}
 	return h.deliver(ctx, event)
 }
 
-func (h *Hub) deliver(_ context.Context, event v1.AuctionEvent) error {
-	for _, conn := range h.roomConnections(event.RoomId) {
-		select {
-		case conn.send <- event:
-		case <-conn.done:
-		default:
-			observability.RecordWSEventDropped(event.GetType().String())
-			h.leave(conn)
-			conn.close()
-		}
-	}
-	return nil
-}
-
-func (h *Hub) enqueueCoalesced(event v1.AuctionEvent) {
+func (h *Hub) enqueueCoalesced(event *v1.AuctionEvent) {
 	roomID := event.GetRoomId()
-	eventType := event.GetType()
 	h.coalesceMu.Lock()
 	pending := h.coalescedRooms[roomID]
 	if pending == nil {
-		pending = &coalescedRoomEvents{events: make(map[v1.AuctionEventType]v1.AuctionEvent)}
+		pending = &coalescedRoomEvents{}
 		h.coalescedRooms[roomID] = pending
 		pending.timer = time.AfterFunc(roomCoalesceDelay, func() {
 			h.flushCoalescedRoom(roomID)
 		})
 	}
-	if _, exists := pending.events[eventType]; exists {
-		observability.RecordWSEventCoalesced(eventType.String())
-	} else {
-		pending.order = append(pending.order, eventType)
+	if pending.event != nil {
+		observability.RecordWSEventCoalesced(event.GetType().String())
 	}
-	pending.events[eventType] = event
+	pending.event = cloneAuctionEvent(event)
 	h.coalesceMu.Unlock()
 }
 
@@ -185,31 +203,35 @@ func (h *Hub) flushCoalescedRoom(roomID string) {
 	if pending.timer != nil {
 		pending.timer.Stop()
 	}
-	events := make([]v1.AuctionEvent, 0, len(pending.events))
-	for _, eventType := range pending.order {
-		if event, ok := pending.events[eventType]; ok {
-			events = append(events, event)
-		}
+	event := pending.event
+	h.coalesceMu.Unlock()
+	if event != nil {
+		_ = h.deliver(context.Background(), event)
+	}
+}
+
+func (h *Hub) discardCoalescedRoom(roomID string, throughVersion int64) {
+	if roomID == "" {
+		return
+	}
+	h.coalesceMu.Lock()
+	pending := h.coalescedRooms[roomID]
+	if pending == nil || (throughVersion > 0 && pending.event.GetLot().GetVersion() > throughVersion) {
+		h.coalesceMu.Unlock()
+		return
+	}
+	delete(h.coalescedRooms, roomID)
+	if pending.timer != nil {
+		pending.timer.Stop()
 	}
 	h.coalesceMu.Unlock()
-	for _, event := range events {
-		_ = h.deliver(context.Background(), event)
+	if pending.event != nil {
+		observability.RecordWSEventCoalesced(pending.event.GetType().String())
 	}
 }
 
 func isPrivateRejectEvent(eventType v1.AuctionEventType) bool {
 	return eventType == v1.AuctionEventType_AUCTION_EVENT_TYPE_BID_REJECTED
-}
-
-func isCoalescibleEvent(eventType v1.AuctionEventType) bool {
-	switch eventType {
-	case v1.AuctionEventType_AUCTION_EVENT_TYPE_BID_ACCEPTED,
-		v1.AuctionEventType_AUCTION_EVENT_TYPE_RANKING_UPDATED,
-		v1.AuctionEventType_AUCTION_EVENT_TYPE_LOT_UPDATED:
-		return true
-	default:
-		return false
-	}
 }
 
 func isImmediateEvent(eventType v1.AuctionEventType) bool {
@@ -225,6 +247,11 @@ func isImmediateEvent(eventType v1.AuctionEventType) bool {
 }
 
 func (h *Hub) ServeRoom(w http.ResponseWriter, r *http.Request, roomID string) {
+	if h.IsDraining() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, ErrHubDraining.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	ctx, authCtx, scope, ok := h.authenticateUpgrade(w, r, roomID)
 	if !ok {
 		return
@@ -235,17 +262,21 @@ func (h *Hub) ServeRoom(w http.ResponseWriter, r *http.Request, roomID string) {
 	}
 
 	client := &connection{
-		hub:     h,
-		roomID:  roomID,
-		scope:   scope,
-		ctx:     ctx,
-		authCtx: authCtx,
-		client:  requestctx.Snapshot(ctx),
-		conn:    conn,
-		send:    make(chan v1.AuctionEvent, connectionSendBuffer),
-		done:    make(chan struct{}),
+		hub:         h,
+		roomID:      roomID,
+		scope:       scope,
+		ctx:         ctx,
+		authCtx:     authCtx,
+		conn:        conn,
+		latestState: make(chan *wireBatch, 1),
+		critical:    make(chan *criticalFrame, criticalQueueCapacity),
+		done:        make(chan struct{}),
 	}
-	h.join(client)
+	if err := h.join(client); err != nil {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "room subscription unavailable"), time.Now().Add(writeTimeout))
+		client.close()
+		return
+	}
 	observability.IncWSConnection(roomID, scope)
 	defer func() {
 		observability.DecWSConnection(roomID, scope)
@@ -353,23 +384,196 @@ func websocketAuthorization(r *http.Request) string {
 	return ""
 }
 
-func (h *Hub) join(conn *connection) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func (h *Hub) join(conn *connection) error {
+	h.subscriptionMu.Lock()
+	defer h.subscriptionMu.Unlock()
 
+	h.mu.Lock()
+	if h.draining {
+		h.mu.Unlock()
+		return ErrHubDraining
+	}
+	first := len(h.rooms[conn.roomID]) == 0
 	if h.rooms[conn.roomID] == nil {
 		h.rooms[conn.roomID] = make(map[*connection]struct{})
 	}
 	h.rooms[conn.roomID][conn] = struct{}{}
+	h.mu.Unlock()
+
+	if first && h.roomSubs != nil {
+		if err := h.roomSubs.RetainRoom(conn.context(), conn.roomID); err != nil {
+			h.mu.Lock()
+			delete(h.rooms[conn.roomID], conn)
+			if len(h.rooms[conn.roomID]) == 0 {
+				delete(h.rooms, conn.roomID)
+			}
+			h.mu.Unlock()
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Hub) Ping(context.Context) error {
+	if h.IsDraining() {
+		return ErrHubDraining
+	}
+	return nil
+}
+
+func (h *Hub) IsDraining() bool {
+	h.mu.RLock()
+	draining := h.draining
+	h.mu.RUnlock()
+	return draining
+}
+
+// BeginDrain closes admission before the load balancer removes this instance.
+// Repeated calls are safe.
+func (h *Hub) BeginDrain() {
+	h.mu.Lock()
+	h.draining = true
+	h.mu.Unlock()
+	h.stopCoalescing()
+}
+
+// Drain asks clients to reconnect in bounded batches and waits for every
+// connection to leave. Context expiry force-closes the remaining sockets.
+func (h *Hub) Drain(ctx context.Context, cfg DrainConfig) error {
+	normalized, err := NormalizeDrainConfig(cfg)
+	if err != nil {
+		return err
+	}
+	h.BeginDrain()
+	if err := waitForDrainStep(ctx, normalized.AdmissionDelay); err != nil {
+		h.forceCloseConnections()
+		return err
+	}
+
+	connections := h.allConnections()
+	for start := 0; start < len(connections); start += normalized.BatchSize {
+		end := start + normalized.BatchSize
+		if end > len(connections) {
+			end = len(connections)
+		}
+		for index, conn := range connections[start:end] {
+			retryAfter := drainRetryAfter(start+index, normalized)
+			conn.enqueueReconnectAndClose("server draining", retryAfter.Milliseconds(), websocket.CloseServiceRestart)
+		}
+		if end < len(connections) {
+			if err := waitForDrainStep(ctx, normalized.BatchInterval); err != nil {
+				h.forceCloseConnections()
+				return err
+			}
+		}
+	}
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if h.ConnectionCount() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			h.forceCloseConnections()
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *Hub) ConnectionCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	total := 0
+	for _, room := range h.rooms {
+		total += len(room)
+	}
+	return total
+}
+
+func (h *Hub) allConnections() []*connection {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	connections := make([]*connection, 0)
+	for _, room := range h.rooms {
+		for conn := range room {
+			connections = append(connections, conn)
+		}
+	}
+	return connections
+}
+
+func (h *Hub) forceCloseConnections() {
+	for _, conn := range h.allConnections() {
+		conn.close()
+	}
+}
+
+func (h *Hub) stopCoalescing() {
+	h.coalesceMu.Lock()
+	rooms := h.coalescedRooms
+	h.coalescedRooms = make(map[string]*coalescedRoomEvents)
+	h.coalesceMu.Unlock()
+	for _, pending := range rooms {
+		if pending != nil && pending.timer != nil {
+			pending.timer.Stop()
+		}
+	}
+}
+
+func waitForDrainStep(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func drainRetryAfter(index int, cfg DrainConfig) time.Duration {
+	minimumMs := cfg.RetryAfterMin.Milliseconds()
+	maximumMs := cfg.RetryAfterMax.Milliseconds()
+	spanMs := maximumMs - minimumMs
+	if spanMs <= 0 {
+		return time.Duration(minimumMs) * time.Millisecond
+	}
+	offsetMs := (int64(index) * 7919) % (spanMs + 1)
+	return time.Duration(minimumMs+offsetMs) * time.Millisecond
 }
 
 func (h *Hub) leave(conn *connection) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.subscriptionMu.Lock()
+	defer h.subscriptionMu.Unlock()
 
-	delete(h.rooms[conn.roomID], conn)
-	if len(h.rooms[conn.roomID]) == 0 {
+	h.mu.Lock()
+	room, exists := h.rooms[conn.roomID]
+	if !exists {
+		h.mu.Unlock()
+		return
+	}
+	if _, exists := room[conn]; !exists {
+		h.mu.Unlock()
+		return
+	}
+	delete(room, conn)
+	last := len(room) == 0
+	if last {
 		delete(h.rooms, conn.roomID)
+	}
+	h.mu.Unlock()
+
+	if last && h.roomSubs != nil {
+		_ = h.roomSubs.ReleaseRoom(conn.roomID)
+	}
+	if last {
+		h.forgetRoomWireState(conn.roomID)
 	}
 }
 
@@ -409,23 +613,7 @@ func (h *Hub) enqueueSnapshot(ctx context.Context, conn *connection) {
 	if err != nil {
 		return
 	}
-	event := v1.AuctionEvent{
-		Id:               idgen.New("evt"),
-		Type:             v1.AuctionEventType_AUCTION_EVENT_TYPE_ROOM_SNAPSHOT,
-		RoomId:           conn.roomID,
-		OccurredAtUnixMs: clock.NowMs(),
-		Snapshot:         snapshot,
-	}
-	if mainAccountID := snapshotMainAccountID(snapshot); mainAccountID != "" {
-		event.MainAccountId = mainAccountID
-	}
-	select {
-	case conn.send <- event:
-	case <-conn.done:
-	default:
-		h.leave(conn)
-		conn.close()
-	}
+	h.enqueueSnapshotState(conn, snapshot, v1.AuctionEventType_AUCTION_EVENT_TYPE_ROOM_SNAPSHOT, idgen.New("evt"), clock.NowMs())
 }
 
 func (c *connection) readPump() {
@@ -466,14 +654,12 @@ func (c *connection) handleClientMessage(payload []byte) {
 	}
 	ctx, authCtx := c.hub.authContextFromAuthorization(c.context(), authorization)
 	if authCtx.TokenStatus != auth.TokenStatusValid {
-		_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid auth"), time.Now().Add(writeTimeout))
-		c.close()
+		c.enqueueReconnectAndClose("invalid auth", 0, websocket.ClosePolicyViolation)
 		return
 	}
 	c.mu.Lock()
 	c.authCtx = authCtx
 	c.ctx = ctx
-	c.client = requestctx.Snapshot(ctx)
 	c.mu.Unlock()
 	c.hub.enqueueSnapshot(c.context(), c)
 }
@@ -497,8 +683,10 @@ func (c *connection) canReceivePrivateEvents() bool {
 }
 
 func (c *connection) writePump() {
-	ticker := time.NewTicker(pingInterval)
-	defer ticker.Stop()
+	pingTicker := time.NewTicker(pingInterval)
+	heartbeatTicker := time.NewTicker(heartbeatInterval)
+	defer pingTicker.Stop()
+	defer heartbeatTicker.Stop()
 	defer func() {
 		c.hub.leave(c)
 		c.close()
@@ -506,23 +694,27 @@ func (c *connection) writePump() {
 
 	for {
 		select {
-		case event := <-c.send:
-			select {
-			case <-c.done:
-				return
-			default:
-			}
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			event = c.eventForDelivery(event)
-			payload, err := eventJSONMarshal.Marshal(&event)
-			if err != nil {
+		case critical := <-c.critical:
+			if !c.writeCritical(critical) {
 				return
 			}
-			if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			continue
+		default:
+		}
+		select {
+		case critical := <-c.critical:
+			if !c.writeCritical(critical) {
 				return
 			}
-			observability.RecordWSEventSent(event.GetType().String())
-		case <-ticker.C:
+		case batch := <-c.latestState:
+			if !c.writeBatch(batch) {
+				return
+			}
+		case <-heartbeatTicker.C:
+			if frame := c.hub.heartbeatFrame(c.roomID, clock.NowMs()); frame != nil && !c.writeFrame(frame) {
+				return
+			}
+		case <-pingTicker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
@@ -533,63 +725,13 @@ func (c *connection) writePump() {
 	}
 }
 
-func (c *connection) eventForDelivery(event v1.AuctionEvent) v1.AuctionEvent {
-	viewer := c.deliveryViewer()
-	if event.GetType() == v1.AuctionEventType_AUCTION_EVENT_TYPE_ROOM_SNAPSHOT && event.GetSnapshot() != nil {
-		mainAccountID := event.GetMainAccountId()
-		if mainAccountID == "" {
-			mainAccountID = snapshotMainAccountID(event.GetSnapshot())
-		}
-		if viewer.CanViewMainAccountPrivate(mainAccountID) {
-			if event.GetMainAccountId() == "" && mainAccountID != "" {
-				cloned := proto.Clone(&event).(*v1.AuctionEvent)
-				cloned.MainAccountId = mainAccountID
-				return *cloned
-			}
-			return event
-		}
-		cloned := proto.Clone(&event).(*v1.AuctionEvent)
-		cloned.Snapshot = auctionbiz.SnapshotForViewer(event.GetSnapshot(), viewer)
-		cloned.MainAccountId = ""
-		return *cloned
-	}
-	return auctionbiz.EventForViewer(event, viewer)
-}
-
-func (c *connection) deliveryViewer() auctionbiz.LotResultViewer {
-	viewer := c.lotResultViewer()
-	if c.scope == ScopeAdmin {
-		return viewer
-	}
-	public := auctionbiz.LotResultViewer{UserID: viewer.UserID}
-	for _, permission := range viewer.PermissionCodes {
-		if userbiz.NormalizePermissionCode(permission) == userbiz.PermissionOrderViewOwn {
-			public.PermissionCodes = append(public.PermissionCodes, userbiz.PermissionOrderViewOwn)
-			break
-		}
-	}
-	return public
-}
-
-func (c *connection) lotResultViewer() auctionbiz.LotResultViewer {
+func (c *connection) viewerIdentity() (userID, mainAccountID string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.authCtx.TokenStatus != auth.TokenStatusValid || c.authCtx.Claims == nil {
-		return auctionbiz.LotResultViewer{}
+		return "", ""
 	}
-	return auctionbiz.LotResultViewer{
-		UserID:          c.authCtx.Claims.UserID,
-		MainAccountID:   auth.EffectiveMainAccountID(c.authCtx.Claims),
-		RoleCodes:       append([]string(nil), c.authCtx.Claims.RoleCodes...),
-		PermissionCodes: append([]string(nil), c.authCtx.Claims.PermissionCodes...),
-	}
-}
-
-func snapshotMainAccountID(snapshot *v1.RoomSnapshot) string {
-	if snapshot == nil || snapshot.GetCurrentLot() == nil {
-		return ""
-	}
-	return strings.TrimSpace(snapshot.GetCurrentLot().GetMainAccountId())
+	return strings.TrimSpace(c.authCtx.Claims.UserID), strings.TrimSpace(auth.EffectiveMainAccountID(c.authCtx.Claims))
 }
 
 func canOpenAdminScope(claims *auth.Claims) bool {
@@ -602,6 +744,8 @@ func canOpenAdminScope(claims *auth.Claims) bool {
 func (c *connection) close() {
 	c.closeOnce.Do(func() {
 		close(c.done)
-		_ = c.conn.Close()
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
 	})
 }

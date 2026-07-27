@@ -1,22 +1,33 @@
 # Security Policy
 
-## Secret Handling
+## Secret handling
 
-This repository is prepared for public delivery. Do not commit:
+Never commit real credentials or sensitive deployment data, including:
 
-- `.env` files with real values
-- server usernames, passwords, or SSH private keys
-- JWT secrets
-- MySQL, Redis, PostgreSQL, or Grafana passwords
-- TOS, DashScope, OpenAI, or other API keys
-- private IP login records or deployment notes containing credentials
+- `.env` files or production configuration dumps
+- JWT/session secrets and passwords
+- database, Redis, Kafka, NATS, Grafana, or Elasticsearch credentials
+- TOS, DashScope, OpenAI, or other cloud/API keys
+- SSH/TLS private keys, kubeconfigs, access tokens, or signed production URLs
 
-Use `.env.example` files for configuration names and placeholders only.
+Configuration examples must contain placeholders or explicitly local-only demo values. Production secrets belong in a secret manager and must be injected at runtime.
 
-## Reporting Issues
+Every public release is scanned from a clean `git archive`, not directly from a developer worktree. This prevents ignored local files from entering the release snapshot.
 
-If you find a leaked credential or sensitive artifact, rotate the affected secret first, then remove it from the repository and history before making the repository public.
+## If a credential is exposed
 
-## Public Delivery Boundary
+1. Revoke or rotate it immediately.
+2. Determine whether it exists only in the current tree or in Git history.
+3. Remove it from the tree and rewrite affected history before publication when necessary.
+4. Re-run secret scanning against both the release snapshot and repository history.
+5. Review logs and provider audit events for unauthorized use.
 
-The public main branch represents the challenge delivery implementation. Experimental distributed-cluster work is intentionally excluded from this branch unless it is separately reviewed, sanitized, and documented.
+Deleting a secret in a later commit is not sufficient because the earlier value remains recoverable from Git history.
+
+## Reporting a vulnerability
+
+Do not place credentials, exploit details, or personal data in a public issue. Use GitHub's private vulnerability reporting or a private Security Advisory when available. A normal public issue is appropriate only for non-sensitive hardening suggestions.
+
+## Public delivery boundary
+
+The public repository contains tracked application source, tests, migration/configuration templates, deployment manifests, and public documentation. It excludes real environments, build/test output, captured H5 datasets, internal agent notes, and private component repository histories.

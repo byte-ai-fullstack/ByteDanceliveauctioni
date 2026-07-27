@@ -5,7 +5,7 @@ package auction.service.v1;
 option go_package = "live-auction-bid/backend/api/auction/service/v1;v1";
 
 import "google/api/annotations.proto";
-import "api/auction/service/v1/auction.proto";
+import "auction/service/v1/auction.proto";
 
 // ShopService covers buyer commerce APIs used by the H5 client.
 service ShopService {
@@ -397,6 +397,8 @@ message UnifiedOrder {
   int64 paid_at_unix_ms = 20;
   int64 expires_at_unix_ms = 21;
   repeated UnifiedOrderItem items = 22;
+  string enrichment_status = 23;
+  int64 enrichment_updated_at_unix_ms = 24;
 }
 
 message UnifiedOrderPayment {

@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: projection-repair-synthetic-preview-
+  namespace: live-auction
+  labels:
+    app.kubernetes.io/name: projection-repair
+    app.kubernetes.io/tier: operations
+    live-auction.io/operation: synthetic-preview
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: projection-repair
+        app.kubernetes.io/tier: operations
+        live-auction.io/operation: synthetic-preview
+    spec:
+      restartPolicy: Never
+      serviceAccountName: auction-worker
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: projection-repair
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-projection-repair"]
+          # This example is intentionally preview-only. Follow the runbook to add
+          # --execute, --executed-by and the exact --confirm value under dual control.
+          args:
+            - synthetic
+            - --bundle=/evidence/synthetic-repair.json
+            - --expected-sha256=REPLACE_WITH_REVIEWED_LOWERCASE_SHA256
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+            - {name: incident-evidence, mountPath: /evidence, readOnly: true}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-projection-repair, defaultMode: 0400}
+        - name: incident-evidence
+          persistentVolumeClaim:
+            claimName: incident-projection-repair-evidence

@@ -210,13 +210,20 @@ function CurrentAuctionPanel({
   );
 }
 
-export function AuctionDrawer({
-  controller,
-  onOpenLotDetail,
-}: {
+type AuctionDrawerProps = {
   controller: LiveRoomController;
   onOpenLotDetail?: (lot: Lot) => void;
-}) {
+};
+
+export function AuctionDrawer(props: AuctionDrawerProps) {
+  if (!props.controller.auctionPanel.open) return null;
+  return <OpenAuctionDrawer {...props} />;
+}
+
+function OpenAuctionDrawer({
+  controller,
+  onOpenLotDetail,
+}: AuctionDrawerProps) {
   const { auctionPanel, actions } = controller;
   const [bidSheetOpen, setBidSheetOpen] = useState(false);
   const [drawerHeight, setDrawerHeight] = useState<number | null>(null);
@@ -225,20 +232,11 @@ export function AuctionDrawer({
   const dragStateRef = useRef<DrawerDragState | null>(null);
   const windowDragCleanupRef = useRef<(() => void) | null>(null);
 
-  useEffect(() => {
-    if (!auctionPanel.open) {
-      setBidSheetOpen(false);
-      setDrawerHeight(null);
-      setDrawerExpanded(false);
-    }
-  }, [auctionPanel.open]);
-
   useEffect(() => () => {
     windowDragCleanupRef.current?.();
     windowDragCleanupRef.current = null;
   }, []);
 
-  if (!auctionPanel.open) return null;
   const activeTab = auctionPanel.tab === 'mine' ? 'mine' : 'current';
   const drawerStyle = drawerHeight ? ({ '--auction-drawer-height': `${drawerHeight}px` } as CSSProperties) : undefined;
   const drawerClassName = [

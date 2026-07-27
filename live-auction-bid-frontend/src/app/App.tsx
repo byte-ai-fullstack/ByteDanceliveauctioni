@@ -1,6 +1,7 @@
 import { Suspense, lazy, type ReactNode } from 'react';
 import { AuthSessionProvider, ProtectedRoute } from '../shared/auth/AuthSessionProvider';
 import { BACKOFFICE_ACCESS_PERMISSIONS } from '../shared/api/types';
+import { useAppLocation } from '../shared/router/historyStore';
 
 const HomePage = lazy(() => import('../pages/home/HomePage').then((module) => ({ default: module.HomePage })));
 const LoginPage = lazy(() => import('../pages/login/LoginPage').then((module) => ({ default: module.LoginPage })));
@@ -11,7 +12,7 @@ function isBackofficePath(pathname: string) {
 }
 
 export function App() {
-  const { pathname } = location;
+  const { pathname } = useAppLocation();
 
   if (pathname.startsWith('/login')) return <AuthSessionProvider><RouteSuspense><LoginPage /></RouteSuspense></AuthSessionProvider>;
   if (isBackofficePath(pathname)) return <AuthSessionProvider><RouteSuspense><ProtectedRoute requiredPermissions={BACKOFFICE_ACCESS_PERMISSIONS}><HostConsolePage /></ProtectedRoute></RouteSuspense></AuthSessionProvider>;

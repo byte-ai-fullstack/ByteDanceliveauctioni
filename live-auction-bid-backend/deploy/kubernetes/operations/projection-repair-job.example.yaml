@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: projection-repair-diagnose-
+  namespace: live-auction
+  labels:
+    app.kubernetes.io/name: projection-repair
+    app.kubernetes.io/tier: operations
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: projection-repair
+        app.kubernetes.io/tier: operations
+    spec:
+      restartPolicy: Never
+      serviceAccountName: auction-worker
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: projection-repair
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-projection-repair"]
+          args: ["diagnose", "--partition=0", "--before=3", "--after=10"]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-projection-repair, defaultMode: 0400}

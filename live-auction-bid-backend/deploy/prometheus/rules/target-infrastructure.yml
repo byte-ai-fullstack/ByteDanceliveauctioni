@@ -1,0 +1,475 @@
+groups:
+  - name: target-infrastructure-availability
+    rules:
+      - alert: AuctionKafkaExporterDown
+        expr: up{job="kafka"} == 0
+        for: 1m
+        labels: {severity: critical, component: kafka}
+        annotations:
+          summary: Kafka metrics endpoint is unavailable
+          description: Kafka health and consumer lag are no longer observable.
+
+      - alert: AuctionRedisExporterDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels: {severity: critical, component: redis}
+        annotations:
+          summary: Redis metrics endpoint is unavailable
+          description: Redis persistence, replication and memory safety are no longer observable.
+
+      - alert: AuctionCloseWorkerDown
+        expr: up{job="close-worker"} == 0
+        for: 30s
+        labels: {severity: critical, component: close-worker}
+        annotations:
+          summary: No runtime close-worker is observable
+          description: Due lots will remain open until a Redis ZSET scanner is restored.
+
+      - alert: AuctionOutboxRelayDown
+        expr: up{job="outbox-relay"} == 0
+        for: 30s
+        labels: {severity: critical, component: outbox-relay}
+        annotations:
+          summary: No Redis outbox relay is observable
+          description: Accepted runtime facts cannot advance from Redis to Kafka.
+
+      - alert: AuctionProjectorDown
+        expr: up{job="projector"} == 0
+        for: 30s
+        labels: {severity: critical, component: projector}
+        annotations:
+          summary: No Kafka runtime projector is observable
+          description: MySQL auction state and orders cannot catch up with accepted runtime facts.
+
+      - alert: AuctionDomainRelayDown
+        expr: up{job="domain-relay"} == 0
+        for: 1m
+        labels: {severity: warning, component: domain-relay}
+        annotations:
+          summary: No MySQL domain relay is observable
+          description: Search, enrichment and other domain consumers cannot receive committed events.
+
+      - alert: AuctionEnrichmentConsumerDown
+        expr: up{job="enrichment-consumer"} == 0
+        for: 1m
+        labels: {severity: warning, component: enrichment-consumer}
+        annotations:
+          summary: No order enrichment consumer is observable
+          description: New auction orders remain visible as PENDING and payment waits for address composition.
+
+      - alert: AuctionPGVectorIndexerDown
+        expr: (up{job="index-pgvector"} == 0) and on() (max(auction_search_component_required{job=~"auction-gateway|live-auction-backend",component="index-pgvector"}) == 1)
+        for: 2m
+        labels: {severity: warning, component: index-pgvector}
+        annotations:
+          summary: No pgvector index consumer is observable
+          description: Semantic indexing is unavailable; keyword search and bidding must remain independent.
+
+      - alert: AuctionElasticsearchIndexerDown
+        expr: (up{job="index-es"} == 0) and on() (max(auction_search_component_required{job=~"auction-gateway|live-auction-backend",component="index-es"}) == 1)
+        for: 2m
+        labels: {severity: warning, component: index-es}
+        annotations:
+          summary: No Elasticsearch index consumer is observable
+          description: Keyword results may be stale; bidding and authoritative MySQL reads must remain independent.
+
+      - alert: AuctionSearchReconcilerDown
+        expr: (up{job="search-reconciler"} == 0) and on() (max(auction_search_component_required{job=~"auction-gateway|live-auction-backend",component="search-reconciler"}) == 1)
+        for: 2m
+        labels: {severity: warning, component: search-reconciler}
+        annotations:
+          summary: Search index reconciliation is unavailable
+          description: MySQL-to-index drift will not be sampled or automatically repaired until this worker returns.
+
+      - alert: AuctionNATSExporterDown
+        expr: up{job="nats"} == 0
+        for: 1m
+        labels: {severity: warning, component: nats}
+        annotations:
+          summary: NATS metrics endpoint is unavailable
+          description: Realtime bus connections, routes and slow consumers are no longer observable.
+
+      - alert: AuctionElasticsearchExporterDown
+        expr: (up{job="elasticsearch"} == 0) and on() (max(auction_search_component_required{job=~"auction-gateway|live-auction-backend",component="elasticsearch"}) == 1)
+        for: 2m
+        labels: {severity: warning, component: elasticsearch}
+        annotations:
+          summary: Elasticsearch metrics endpoint is unavailable
+          description: Search must degrade to authoritative MySQL filters while Elasticsearch is unhealthy.
+
+      - alert: AuctionPgvectorExporterDown
+        expr: (up{job="pgvector"} == 0) and on() (max(auction_search_component_required{job=~"auction-gateway|live-auction-backend",component="pgvector"}) == 1)
+        for: 2m
+        labels: {severity: warning, component: pgvector}
+        annotations:
+          summary: pgvector metrics endpoint is unavailable
+          description: Semantic recommendations must be hidden while pgvector health is unknown.
+
+      - alert: AuctionMySQLExporterDown
+        expr: up{job="mysql"} == 0
+        for: 1m
+        labels: {severity: critical, component: mysql}
+        annotations:
+          summary: MySQL metrics endpoint is unavailable
+          description: Database connections, durability and replication safety are no longer observable.
+
+      - alert: AuctionNodeExporterDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels: {severity: critical, component: host}
+        annotations:
+          summary: Host resource metrics endpoint is unavailable
+          description: Durable-store disk pressure can no longer be evaluated safely.
+
+  - name: target-infrastructure-safety
+    rules:
+      - alert: AuctionKafkaNoBroker
+        expr: kafka_brokers < 1
+        for: 30s
+        labels: {severity: critical, component: kafka}
+        annotations:
+          summary: Kafka has no observable broker
+          description: Runtime facts cannot be durably published; the projection gate must close.
+
+      - alert: AuctionKafkaUnderReplicatedPartitions
+        expr: sum(kafka_topic_partition_under_replicated_partition) > 0
+        for: 1m
+        labels: {severity: critical, component: kafka}
+        annotations:
+          summary: Kafka partitions are under-replicated
+          description: At least one partition has fewer in-sync replicas than its replica assignment.
+
+      - alert: AuctionKafkaConsumerLagGrowing
+        expr: max(kafka_consumergroup_lag) > 1000
+        for: 5m
+        labels: {severity: warning, component: kafka}
+        annotations:
+          summary: Kafka consumer lag is above the initial safety threshold
+          description: Identify the consumer group and compare oldest-event age with retention headroom.
+
+      - alert: AuctionRedisRejectedByPersistence
+        expr: increase(redis_rejected_connections_total[5m]) > 0
+        for: 0m
+        labels: {severity: critical, component: redis}
+        annotations:
+          summary: Redis has rejected client connections
+          description: Check connection limits, persistence errors and failover generation before restoring writes.
+
+      - alert: AuctionRedisEvictedKeys
+        expr: increase(redis_evicted_keys_total[5m]) > 0
+        for: 0m
+        labels: {severity: critical, component: redis}
+        annotations:
+          summary: Redis evicted keys despite the noeviction contract
+          description: Runtime state or outbox data may be missing; freeze writes and reconcile immediately.
+
+      - alert: AuctionRuntimeCloseError
+        expr: increase(auction_close_result_total{result="error"}[5m]) > 0
+        for: 0m
+        labels: {severity: critical, component: close-worker}
+        annotations:
+          summary: Runtime close Lua invocation failed
+          description: Inspect Redis availability and runtime-state reconciliation before accepting the settlement delay.
+
+      - alert: AuctionOrderEnrichmentFailures
+        expr: increase(auction_order_enrichment_result_total{result=~"apply_failed|retry_exhausted|dlq_failed|commit_failed|dlq_commit_failed"}[5m]) > 0
+        for: 0m
+        labels: {severity: warning, component: enrichment-consumer}
+        annotations:
+          summary: Order enrichment processing is not advancing safely
+          description: Inspect MySQL, Kafka DLQ acknowledgements and message identity before replaying the consumer group.
+
+      - alert: AuctionOrderEnrichmentLagHigh
+        expr: max(auction_order_enrichment_lag_records) > 100
+        for: 5m
+        labels: {severity: warning, component: enrichment-consumer}
+        annotations:
+          summary: Order enrichment Kafka lag exceeds the initial threshold
+          description: Orders may remain PENDING or PARTIAL; compare consumer capacity with Kafka partition lag.
+
+      - alert: AuctionOrderVisibilityLagHigh
+        expr: max by (job, instance) (auction_order_visibility_lag_ms) > 5000
+        for: 2m
+        labels: {severity: warning, component: domain-relay}
+        annotations:
+          summary: A projected order has remained CREATING beyond 5 seconds
+          description: Inspect Runtime projection lag and the order.created domain outbox route before buyers exceed the visibility SLO.
+
+      - alert: AuctionOrderVisibilityLagCritical
+        expr: max by (job, instance) (auction_order_visibility_lag_ms) > 30000
+        for: 1m
+        labels: {severity: critical, component: domain-relay}
+        annotations:
+          summary: A projected order has remained CREATING beyond 30 seconds
+          description: Restore Projector or domain-relay progress; buyers must continue receiving HTTP 202 rather than a false not-found response.
+
+      - alert: AuctionNATSSubscriptionDrift
+        expr: |
+          abs(
+            auction_nats_subscriptions{job="gateway"}
+            - on (job, instance)
+              sum by (job, instance) (
+                max by (job, instance, room_id) (auction_ws_connections{job="gateway"}) > bool 0
+              )
+          ) > 0
+        for: 5m
+        labels: {severity: warning, component: gateway}
+        annotations:
+          summary: Gateway NATS room subscriptions differ from viewed rooms
+          description: Inspect Hub retain/release and NATS reconnect handling; sustained drift can leak subscriptions or leave active rooms without realtime delivery.
+
+      - alert: AuctionPGVectorIndexLagHigh
+        expr: max(auction_search_vector_lag_records) > 100
+        for: 5m
+        labels: {severity: warning, component: index-pgvector}
+        annotations:
+          summary: Pgvector Kafka consumer lag exceeds the initial threshold
+          description: Semantic results may be stale; inspect embedding quota, provider errors and PostgreSQL capacity.
+
+      - alert: AuctionElasticsearchIndexLagHigh
+        expr: max(auction_search_elasticsearch_lag_records) > 100
+        for: 5m
+        labels: {severity: warning, component: index-es}
+        annotations:
+          summary: Elasticsearch Kafka consumer lag exceeds the initial threshold
+          description: Keyword results may be stale; inspect consumer capacity, version conflicts and Elasticsearch health.
+
+      - alert: AuctionElasticsearchIndexFailures
+        expr: increase(auction_search_elasticsearch_result_total{result=~"retry_exhausted|commit_failed|finding_failed"}[5m]) > 0
+        for: 0m
+        labels: {severity: warning, component: index-es}
+        annotations:
+          summary: Elasticsearch indexing is not advancing safely
+          description: Inspect Kafka offset commits, cluster availability and the domain DLQ before replaying the consumer group.
+
+      - alert: AuctionElasticsearchIdentityConflict
+        expr: increase(auction_search_elasticsearch_result_total{result="identity_conflict_dead_lettered"}[5m]) > 0
+        for: 0m
+        labels: {severity: critical, component: index-es}
+        annotations:
+          summary: Elasticsearch rejected a non-deterministic lot version
+          description: Inspect SEARCH_INDEX_CONFLICT P0 findings and the matching domain DLQ evidence before any replay.
+
+      - alert: AuctionSearchReconcileIdentityConflict
+        expr: increase(auction_search_reconcile_total{result=~"conflict|ahead"}[5m]) > 0
+        for: 0m
+        labels: {severity: critical, component: search-reconciler}
+        annotations:
+          summary: A search index identity fork was detected
+          description: Inspect SEARCH_ES_* or SEARCH_VECTOR_* P0 findings; the reconciler never overwrites equal or higher versions.
+
+      - alert: AuctionSearchRepairFailure
+        expr: increase(auction_search_repair_total{result="failed"}[5m]) > 0
+        for: 0m
+        labels: {severity: warning, component: search-reconciler}
+        annotations:
+          summary: A canonical search repair could not be published
+          description: Check Kafka acknowledgements and the search-reconciler principal before the next page retry.
+
+      - alert: AuctionSearchIndexDriftHigh
+        expr: increase(auction_search_index_stale_total[15m]) > 20
+        for: 5m
+        labels: {severity: warning, component: search-reconciler}
+        annotations:
+          summary: Search index drift is being repaired repeatedly
+          description: Group by sink, compare consumer lag and verify retention, DLQ and external dependency health.
+
+      - alert: AuctionSearchReconcileUnavailableSink
+        expr: increase(auction_search_reconcile_total{result="error"}[10m]) > 5
+        for: 2m
+        labels: {severity: warning, component: search-reconciler}
+        annotations:
+          summary: Search reconciliation repeatedly cannot read an index
+          description: One sink remains independently repairable; inspect Elasticsearch and pgvector availability by sink label.
+
+      - alert: AuctionSearchReconcileStalled
+        expr: time() - auction_search_reconcile_last_success_unixtime > 600
+        for: 2m
+        labels: {severity: warning, component: search-reconciler}
+        annotations:
+          summary: Search reconciliation has not completed a page recently
+          description: Inspect MySQL snapshot queries, index response latency, findings writes and Kafka repair acknowledgements.
+
+      - alert: AuctionBuyerSearchFallbackHigh
+        expr: increase(auction_search_fallback_total{mode!="mysql_only"}[10m]) > 20
+        for: 5m
+        labels: {severity: warning, component: gateway-search}
+        annotations:
+          summary: Buyer search is repeatedly falling back from indexed retrieval
+          description: Compare Elasticsearch and pgvector retrieval errors with authoritative hydration and Redis runtime health.
+
+      - alert: AuctionBuyerSearchRetrieverErrors
+        expr: increase(auction_search_retrieval_total{result="error"}[5m]) > 5
+        for: 2m
+        labels: {severity: warning, component: gateway-search}
+        annotations:
+          summary: A buyer search retriever is failing repeatedly
+          description: Inspect the source label to isolate Elasticsearch, embedding provider, or pgvector failures.
+
+      - alert: AuctionBuyerSearchRetrievalP99High
+        expr: histogram_quantile(0.99, sum by (le, source) (rate(auction_search_retrieval_duration_ms_bucket{result="ok"}[10m]))) > 1000
+        for: 5m
+        labels: {severity: warning, component: gateway-search}
+        annotations:
+          summary: Buyer indexed-search retrieval p99 exceeds one second
+          description: Inspect the source label and separate Elasticsearch query latency from embedding plus pgvector latency; external LLM generation is not part of this SLO.
+
+      - alert: AuctionRuntimeGenerationFrozen
+        expr: auction_runtime_generation_ready == 0
+        for: 15s
+        labels: {severity: critical, component: redis}
+        annotations:
+          summary: Runtime writes are frozen for an unverified Redis generation
+          description: Check Sentinel failover, Redis run_id, per-lot reconciliation findings and Projector health before restoring traffic.
+
+      - alert: AuctionProjectionGateUnavailable
+        expr: max(auction_projection_gate_ready{job="auction-service"}) == 0
+        for: 15s
+        labels: {severity: critical, component: auction-service}
+        annotations:
+          summary: Every auction-service projection gate is closed
+          description: New starts, bids and live configuration changes are being rejected; inspect the bounded gate reason, Kafka Runtime Topic and MySQL projector offsets.
+
+      - alert: AuctionProjectionGateDegraded
+        expr: (min(auction_projection_gate_ready{job="auction-service"}) == 0) and (max(auction_projection_gate_ready{job="auction-service"}) == 1)
+        for: 1m
+        labels: {severity: warning, component: auction-service}
+        annotations:
+          summary: Auction-service projection gate state differs between replicas
+          description: Compare Kafka/MySQL reachability, partition visibility and snapshot age across auction-service instances before the remaining admission capacity closes.
+
+      - alert: AuctionProjectionGateRejectingCommands
+        expr: sum(increase(auction_projection_gate_rejection_total{job="auction-service"}[5m])) > 0
+        for: 0m
+        labels: {severity: warning, component: auction-service}
+        annotations:
+          summary: The end-to-end projection gate rejected runtime commands
+          description: Group rejections by the bounded reason label; cancel and expiry-close commands remain available while the projector recovers.
+
+      - alert: AuctionProjectionRetentionHeadroomLow
+        expr: min(auction_projection_gate_retention_headroom_ms{job="auction-service"}) < 604800000
+        for: 1m
+        labels: {severity: critical, component: projector}
+        annotations:
+          summary: Runtime Topic projection retention headroom is below seven days
+          description: Restore projector progress or execute the audited repair workflow before the MySQL offset crosses the Kafka retention cliff.
+
+      - alert: AuctionProjectionOldestAgeHigh
+        expr: max(auction_projection_gate_oldest_age_ms{job="auction-service"}) > 24000
+        for: 15s
+        labels: {severity: warning, component: projector}
+        annotations:
+          summary: The oldest unprojected Runtime record is approaching 30 seconds
+          description: Restore projector throughput before the auction-service admission gate reaches its default oldest-age limit.
+
+      - alert: AuctionElasticsearchClusterRed
+        expr: elasticsearch_cluster_health_status{color="red"} == 1
+        for: 1m
+        labels: {severity: critical, component: elasticsearch}
+        annotations:
+          summary: Elasticsearch cluster health is red
+          description: Disable indexed search results and retain MySQL fallback until recovery and reconciliation finish.
+
+      - alert: AuctionPgvectorDatabaseDown
+        expr: pg_up == 0
+        for: 1m
+        labels: {severity: warning, component: pgvector}
+        annotations:
+          summary: pgvector database is unavailable
+          description: Hide semantic recommendations; keyword search and bidding remain available.
+
+      - alert: AuctionMySQLConnectionsHigh
+        expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections > 0.8
+        for: 5m
+        labels: {severity: warning, component: mysql}
+        annotations:
+          summary: MySQL connections exceed 80 percent of the configured maximum
+          description: Compare per-workload pool usage with the connection budget before admission failures begin.
+
+      - alert: AuctionDurableDiskUsageHigh
+        expr: 1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|tracefs",mountpoint!~"^/(dev|proc|sys|run)($|/)"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|tracefs",mountpoint!~"^/(dev|proc|sys|run)($|/)"}) > 0.75
+        for: 5m
+        labels: {severity: warning, component: storage}
+        annotations:
+          summary: A durable host filesystem exceeds 75 percent usage
+          description: Identify the mounted Kafka, Redis, MySQL, Elasticsearch or PostgreSQL data path and add headroom before it reaches the critical watermark.
+
+      - alert: AuctionDurableDiskUsageCritical
+        expr: 1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|tracefs",mountpoint!~"^/(dev|proc|sys|run)($|/)"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|tracefs",mountpoint!~"^/(dev|proc|sys|run)($|/)"}) > 0.85
+        for: 1m
+        labels: {severity: critical, component: storage}
+        annotations:
+          summary: A durable host filesystem exceeds 85 percent usage
+          description: Close the projection gate or freeze nonessential writers and restore disk headroom immediately.
+
+      - alert: AuctionPersistentVolumeUsageHigh
+        expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.75) and on(namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes > 0)
+        for: 5m
+        labels: {severity: warning, component: storage}
+        annotations:
+          summary: A Kubernetes persistent volume exceeds 75 percent usage
+          description: Map the PVC to its durable auction store and expand or clean it before the critical watermark.
+
+      - alert: AuctionPersistentVolumeUsageCritical
+        expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.85) and on(namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes > 0)
+        for: 1m
+        labels: {severity: critical, component: storage}
+        annotations:
+          summary: A Kubernetes persistent volume exceeds 85 percent usage
+          description: Close the projection gate or freeze nonessential writers and restore PVC headroom immediately.
+
+      - alert: AuctionHostMemoryUsageHigh
+        expr: 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.75
+        for: 5m
+        labels: {severity: warning, component: memory}
+        annotations:
+          summary: A durable-store host exceeds 75 percent memory usage
+          description: Identify the Kafka, Redis, MySQL, Elasticsearch or PostgreSQL process consuming the host budget before swap or OOM pressure begins.
+
+      - alert: AuctionHostMemoryUsageCritical
+        expr: 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.85
+        for: 1m
+        labels: {severity: critical, component: memory}
+        annotations:
+          summary: A durable-store host exceeds 85 percent memory usage
+          description: Freeze nonessential work, preserve the core event path and restore host memory headroom immediately.
+
+      - alert: AuctionRedisMemoryLimitMissing
+        expr: redis_memory_max_bytes == 0
+        for: 5m
+        labels: {severity: critical, component: redis}
+        annotations:
+          summary: Redis has no enforceable maxmemory limit
+          description: Configure a tested maxmemory below the VM or container limit while retaining noeviction; host OOM is not an acceptable capacity boundary.
+
+      - alert: AuctionRedisMemoryUsageHigh
+        expr: (redis_memory_used_bytes / redis_memory_max_bytes > 0.75) and on(instance) (redis_memory_max_bytes > 0)
+        for: 5m
+        labels: {severity: warning, component: redis}
+        annotations:
+          summary: Redis exceeds 75 percent of maxmemory
+          description: Reduce retained runtime data or expand Redis before noeviction rejects a core state transition.
+
+      - alert: AuctionRedisMemoryUsageCritical
+        expr: (redis_memory_used_bytes / redis_memory_max_bytes > 0.85) and on(instance) (redis_memory_max_bytes > 0)
+        for: 1m
+        labels: {severity: critical, component: redis}
+        annotations:
+          summary: Redis exceeds 85 percent of maxmemory
+          description: Close the projection gate for new work and restore Redis memory headroom without enabling eviction.
+
+      - alert: AuctionElasticsearchHeapUsageHigh
+        expr: elasticsearch_jvm_memory_used_bytes{area="heap"} / ignoring(area) elasticsearch_jvm_memory_max_bytes > 0.75
+        for: 5m
+        labels: {severity: warning, component: elasticsearch}
+        annotations:
+          summary: Elasticsearch JVM heap exceeds 75 percent
+          description: Throttle indexing or add search capacity while auction queries continue through their authoritative fallback.
+
+      - alert: AuctionElasticsearchHeapUsageCritical
+        expr: elasticsearch_jvm_memory_used_bytes{area="heap"} / ignoring(area) elasticsearch_jvm_memory_max_bytes > 0.85
+        for: 1m
+        labels: {severity: critical, component: elasticsearch}
+        annotations:
+          summary: Elasticsearch JVM heap exceeds 85 percent
+          description: Disable nonessential indexing and preserve MySQL fallback until heap and GC pressure recover.

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "scripts/*.mjs",
+    "tests/*.spec.ts"
+  ],
+  "project": [
+    "src/**/*.{ts,tsx}",
+    "scripts/*.mjs",
+    "tests/**/*.ts",
+    "*.config.ts"
+  ],
+  "ignore": [
+    "src/shared/api/generated/auction.schema.ts"
+  ]
+}

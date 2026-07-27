@@ -1,0 +1,517 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auction-gateway
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app.kubernetes.io/name: auction-gateway}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: auction-gateway}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-gateway
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector: {matchLabels: {app.kubernetes.io/name: auction-gateway}}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: auction-gateway}}
+      containers:
+        - name: gateway
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-gateway"]
+          ports:
+            - {name: http, containerPort: 18080}
+          envFrom:
+            - configMapRef: {name: auction-runtime-config}
+          env:
+            - name: AUCTION_INSTANCE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - name: AUCTION_REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-password}}
+            - name: AUCTION_REDIS_SENTINEL_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-sentinel-password, optional: true}}
+            - name: AUCTION_JWT_SECRET
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: jwt-secret}}
+            - name: AUCTION_NATS_URLS
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: gateway-nats-urls}}
+            - name: AUCTION_TOS_ENDPOINT
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: tos-endpoint}}
+            - name: AUCTION_TOS_REGION
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: tos-region}}
+            - name: AUCTION_TOS_BUCKET
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: tos-bucket}}
+            - name: AUCTION_TOS_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: tos-access-key}}
+            - name: AUCTION_TOS_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: tos-secret-key}}
+          startupProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auction-service
+spec:
+  replicas: 8
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
+  selector:
+    matchLabels: {app.kubernetes.io/name: auction-service}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: auction-service}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18086"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-service
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector: {matchLabels: {app.kubernetes.io/name: auction-service}}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: auction-service}}
+      containers:
+        - name: auction-service
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-service"]
+          ports:
+            - {name: grpc, containerPort: 19090}
+            - {name: operations, containerPort: 18086}
+          envFrom:
+            - configMapRef: {name: auction-runtime-config}
+          env:
+            - name: AUCTION_INSTANCE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - name: AUCTION_REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-password}}
+            - name: AUCTION_REDIS_SENTINEL_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-sentinel-password, optional: true}}
+            - name: AUCTION_JWT_SECRET
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: jwt-secret}}
+            - name: AUCTION_NATS_URLS
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: auction-service-nats-urls}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          startupProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-auction-service}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outbox-relay
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app.kubernetes.io/name: outbox-relay}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: outbox-relay
+        app.kubernetes.io/tier: event-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18082"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/tier: event-worker}}
+      containers:
+        - name: outbox-relay
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-outbox-relay"]
+          ports: [{name: operations, containerPort: 18082}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_INSTANCE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: AUCTION_REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-password}}
+            - name: AUCTION_REDIS_SENTINEL_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-sentinel-password, optional: true}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret:
+            secretName: auction-kafka-outbox-relay
+            defaultMode: 0400
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: projector
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: projector}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: projector
+        app.kubernetes.io/tier: event-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18083"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/tier: event-worker}}
+      containers:
+        - name: projector
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-projector"]
+          ports: [{name: operations, containerPort: 18083}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-projector, defaultMode: 0400}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: domain-relay
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: domain-relay}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: domain-relay
+        app.kubernetes.io/tier: event-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18084"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/tier: event-worker}}
+      containers:
+        - name: domain-relay
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-domain-relay"]
+          ports: [{name: operations, containerPort: 18084}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_INSTANCE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - name: AUCTION_DOMAIN_RELAY_NATS_URLS
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: domain-relay-nats-urls}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-domain-relay, defaultMode: 0400}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enrichment-consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: enrichment-consumer}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: enrichment-consumer
+        app.kubernetes.io/tier: event-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18087"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/tier: event-worker}}
+      containers:
+        - name: enrichment-consumer
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-enrichment-consumer"]
+          ports: [{name: operations, containerPort: 18087}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_MYSQL_DSN
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: mysql-dsn}}
+            - {name: AUCTION_KAFKA_CLIENT_PROPERTIES_FILE, value: /var/run/auction-kafka/client.properties}
+          volumeMounts:
+            - {name: kafka-client, mountPath: /var/run/auction-kafka, readOnly: true}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kafka-client
+          secret: {secretName: auction-kafka-enrichment, defaultMode: 0400}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: close-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: close-worker}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: close-worker
+        app.kubernetes.io/tier: event-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18085"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: auction-worker
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/tier: event-worker}}
+      containers:
+        - name: close-worker
+          image: live-auction-bid-backend:release-template@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/app/auction-close-worker"]
+          ports: [{name: operations, containerPort: 18085}]
+          envFrom: [{configMapRef: {name: auction-runtime-config}}]
+          env:
+            - name: AUCTION_INSTANCE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: AUCTION_REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-password}}
+            - name: AUCTION_REDIS_SENTINEL_PASSWORD
+              valueFrom: {secretKeyRef: {name: auction-runtime-credentials, key: redis-sentinel-password, optional: true}}
+          startupProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: operations}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: operations}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true

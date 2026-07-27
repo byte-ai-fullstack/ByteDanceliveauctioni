@@ -3,7 +3,7 @@
 报告版本：2026-06-07  
 文档类型：性能优化回归报告  
 内容范围：后端性能改造、服务器部署、公网自动化压测、运行指标复核  
-测试环境：`http://example.com`
+测试环境：`http://120.79.7.110`
 
 > 本次报告记录 2026-06-07 后端性能优化上线后的验证结果。测试重点是出价热路径、运行态投影批处理、Redis/MySQL 连接池、Nginx 访问日志和公网链路稳定性。
 
@@ -39,7 +39,7 @@
 | 后端镜像 | `live-auction-bid-backend:prod` |
 | 后端提交 | `8083657 perf(auction): add projection backpressure and batching` |
 | 测试时间 | 2026-06-07 15:56:23 - 16:02:24 |
-| 压测入口 | 公网 `http://example.com` |
+| 压测入口 | 公网 `http://120.79.7.110` |
 | 核心目标 | 验证出价热路径不被 MySQL 投影拖慢，投影队列无积压，公网链路无 5xx 和网络错误 |
 
 ### 8.3 测试套件流程
@@ -57,7 +57,7 @@
 
 ```bash
 go run . test-suite \
-  --base-url http://example.com \
+  --base-url http://120.79.7.110 \
   --reports-dir reports/suite-20260607-155623 \
   --output reports/latest-suite-summary-deploy-20260607-155623.md
 ```
@@ -192,12 +192,12 @@ tmp/auction-stress-test-main/../项目汇报材料/压测报告/2026-06-07-15562
 
 | 用例 | 命令等价参数 | H5 直播间 | 原始 JSON |
 | --- | --- | --- | --- |
-| smoke-live | `users=3 interval=3s duration=30s` | `http://example.com/m/room/321920395596791808` | `reports/suite-20260607-155623/smoke-live/report-20260607-155717.json` |
-| visual-slow | `users=30 interval=2s duration=2m0s` | `http://example.com/m/room/321920515096707072` | `reports/suite-20260607-155623/visual-slow/report-20260607-155913.json` |
-| visual-medium | `users=50 interval=500ms duration=1m30s` | `http://example.com/m/room/321921010880217088` | `reports/suite-20260607-155623/visual-medium/report-20260607-160037.json` |
-| visual-fast | `users=50 interval=200ms duration=1m0s` | `http://example.com/m/room/321921396613578752` | `reports/suite-20260607-155623/visual-fast/report-20260607-160154.json` |
-| concurrent-light | `users=100 concurrency=50 rounds=1` | `http://example.com/m/room/321921700943888384` | `reports/suite-20260607-155623/concurrent-light/report-20260607-160155.json` |
-| concurrent-medium | `users=200 concurrency=100 rounds=2` | `http://example.com/m/room/321921782271442944` | `reports/suite-20260607-155623/concurrent-medium/report-20260607-160224.json` |
+| smoke-live | `users=3 interval=3s duration=30s` | `http://120.79.7.110/m/room/321920395596791808` | `reports/suite-20260607-155623/smoke-live/report-20260607-155717.json` |
+| visual-slow | `users=30 interval=2s duration=2m0s` | `http://120.79.7.110/m/room/321920515096707072` | `reports/suite-20260607-155623/visual-slow/report-20260607-155913.json` |
+| visual-medium | `users=50 interval=500ms duration=1m30s` | `http://120.79.7.110/m/room/321921010880217088` | `reports/suite-20260607-155623/visual-medium/report-20260607-160037.json` |
+| visual-fast | `users=50 interval=200ms duration=1m0s` | `http://120.79.7.110/m/room/321921396613578752` | `reports/suite-20260607-155623/visual-fast/report-20260607-160154.json` |
+| concurrent-light | `users=100 concurrency=50 rounds=1` | `http://120.79.7.110/m/room/321921700943888384` | `reports/suite-20260607-155623/concurrent-light/report-20260607-160155.json` |
+| concurrent-medium | `users=200 concurrency=100 rounds=2` | `http://120.79.7.110/m/room/321921782271442944` | `reports/suite-20260607-155623/concurrent-medium/report-20260607-160224.json` |
 
 ## A.2 服务器运行指标
 
@@ -205,7 +205,7 @@ tmp/auction-stress-test-main/../项目汇报材料/压测报告/2026-06-07-15562
 | --- | ---: |
 | `auction_bid_accepted_total` | 660 |
 | `auction_bid_rejected_total{reason="BID_TOO_LOW"}` | 420 |
-| `auction_runtime_event_xadd_total` | 12035 |
+| accepted runtime facts (legacy baseline counter) | 12035 |
 | `auction_projection_pending_count` | 0 |
 | `auction_projection_lag_ms` | 0 |
 | `auction_projection_failed_total` | 0 |

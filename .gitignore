@@ -20,22 +20,11 @@ coverage/
 *.test
 *.out
 
-# Tests are private-only in the public mirror
-*_test.go
-*test*
-*Test*
-*spec*
-*Spec*
-*.test.*
-*.spec.*
-__tests__/
-test/
-tests/
-
 # Logs and reports
 *.log
 logs/
 reports/
+test-results/
 tmp/
 .tmp/
 
@@ -62,6 +51,6 @@ docs/KNOWLEDGE_BASE.md
 **/docs/task/
 **/design-qa.md
 
-# Non-public sample/scraped data and design drafts
+# Non-public captured/scraped data and design drafts
 **/public/data/
 **/public/shop-icon-drafts/

@@ -1,0 +1,41 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "refresh_interval": "1s"
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "lot_id": { "type": "keyword", "ignore_above": 64 },
+      "room_id": { "type": "keyword", "ignore_above": 64 },
+      "main_account_id": { "type": "keyword", "ignore_above": 64 },
+      "title": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart",
+        "fields": { "keyword": { "type": "keyword", "ignore_above": 255 } }
+      },
+      "description": {
+        "type": "text",
+        "analyzer": "ik_max_word",
+        "search_analyzer": "ik_smart"
+      },
+      "category": { "type": "keyword", "ignore_above": 64 },
+      "tags": { "type": "keyword", "ignore_above": 64 },
+      "image_url": { "type": "keyword", "index": false, "doc_values": false },
+      "status": { "type": "keyword", "ignore_above": 64 },
+      "start_price_fen": { "type": "long" },
+      "current_price_fen": { "type": "long" },
+      "currency": { "type": "keyword", "ignore_above": 3 },
+      "starts_at": { "type": "date", "format": "epoch_millis" },
+      "ends_at": { "type": "date", "format": "epoch_millis" },
+      "href": { "type": "keyword", "index": false, "doc_values": false },
+      "public_visible": { "type": "boolean" },
+      "lot_version": { "type": "long" },
+      "last_event_id": { "type": "keyword", "ignore_above": 128 },
+      "content_hash": { "type": "keyword", "ignore_above": 64 },
+      "indexed_at": { "type": "date", "format": "epoch_millis" }
+    }
+  }
+}

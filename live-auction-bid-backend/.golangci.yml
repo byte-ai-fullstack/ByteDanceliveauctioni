@@ -1,0 +1,36 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        domain-boundary:
+          files:
+            - "**/app/auction/service/internal/biz/**/*.go"
+          deny:
+            - pkg: "gorm.io/gorm"
+              desc: "domain packages must depend on repository interfaces, not GORM"
+            - pkg: "github.com/redis/go-redis/v9"
+              desc: "domain packages must not depend on Redis clients"
+            - pkg: "github.com/twmb/franz-go"
+              desc: "domain packages must not depend on Kafka clients"
+            - pkg: "github.com/nats-io/nats.go"
+              desc: "domain packages must not depend on NATS clients"
+            - pkg: "net/http"
+              desc: "domain packages must not depend on HTTP transports or clients"
+            - pkg: "live-auction-bid/backend/app/auction/service/internal/data"
+              desc: "domain packages define persistence interfaces and must not import adapters"
+            - pkg: "live-auction-bid/backend/app/auction/service/internal/gateway"
+              desc: "domain packages must not import transport adapters"
+            - pkg: "live-auction-bid/backend/app/auction/service/internal/kafkaclient"
+              desc: "domain packages must not import Kafka infrastructure"
+            - pkg: "live-auction-bid/backend/app/auction/service/internal/realtime"
+              desc: "domain packages must not import realtime infrastructure"
+            - pkg: "live-auction-bid/backend/app/auction/service/internal/redisclient"
+              desc: "domain packages must not import Redis infrastructure"
+            - pkg: "live-auction-bid/backend/app/auction/service/internal/server"
+              desc: "domain packages must not import server transports"
+            - pkg: "live-auction-bid/backend/app/auction/service/internal/worker"
+              desc: "domain packages must not import worker implementations"

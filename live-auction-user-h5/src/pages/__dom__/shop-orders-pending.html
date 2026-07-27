@@ -1,0 +1,105 @@
+<main class="mobileShell dyMallOrdersShell">
+<header class="dyMallOrdersTop">
+<button type="button" aria-label="返回">
+<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-chevron-left" aria-hidden="true">
+<path d="m15 18-6-6 6-6">
+</path>
+</svg>
+</button>
+<form>
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-search" aria-hidden="true">
+<path d="m21 21-4.34-4.34">
+</path>
+<circle cx="11" cy="11" r="8">
+</circle>
+</svg>
+<input aria-label="搜索订单" placeholder="搜索商品名 / 订单号 / 快递单号" value="">
+</form>
+<a href="/shop?panel=package" aria-label="包裹">
+<svg width="50" height="34" viewBox="0 0 150 100" fill="none" aria-hidden="true">
+<g stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+<rect x="6" y="34" width="52" height="41" fill="#fff">
+</rect>
+<path d="M6 34L29 6">
+</path>
+<path d="M58 34L76 6">
+</path>
+<path d="M28 6H76">
+</path>
+<path d="M76 37V7">
+</path>
+<path d="M18 20H66">
+</path>
+</g>
+<text x="65" y="66" fill="currentColor" font-family="PingFang SC, Microsoft YaHei, SimHei, Arial, sans-serif" font-size="32" font-weight="900" letter-spacing="-2">包裹</text>
+</svg>
+</a>
+<button type="button" aria-label="订单工具" aria-expanded="false">
+<svg width="32" height="36" viewBox="0 0 80 100" fill="none" aria-hidden="true">
+<g stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+<rect x="12" y="16" width="18" height="18" rx="4">
+</rect>
+<rect x="42" y="16" width="18" height="18" rx="4">
+</rect>
+<rect x="12" y="46" width="18" height="18" rx="4">
+</rect>
+<rect x="42" y="46" width="18" height="18" rx="4">
+</rect>
+</g>
+</svg>
+</button>
+</header>
+<nav class="dyMallOrderTabs" aria-label="订单状态">
+<button class="isActive" type="button">全部</button>
+<button class="" type="button">待支付</button>
+<button class="" type="button">待发货</button>
+<button class="" type="button">待收货/使用</button>
+<button class="" type="button">评价</button>
+<button type="button" aria-label="筛选">
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-funnel" aria-hidden="true">
+<path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z">
+</path>
+</svg>
+</button>
+</nav>
+<section class="dyMallFrequentStores" aria-label="常买的店">
+<header>
+<h2>常买的店</h2>
+<a href="/shop">查看更多 ›</a>
+</header>
+<div>
+<a href="/m/room/room-fixture-01">
+<img alt="严选珠宝直播间" src="https://assets.example.test/store-fixture-01.jpg">
+<span>严选珠宝直播间</span>
+</a>
+</div>
+</section>
+<section class="dyMallOrderList" aria-label="我的订单">
+<article class="dyMallOrderCard">
+<header>
+<b>严选珠宝直播间</b>
+<span>待支付</span>
+</header>
+<a href="#" class="dyMallOrderItem">
+<img alt="和田玉平安扣" src="https://assets.example.test/lot-fixture-01.jpg">
+<section>
+<h2>和田玉平安扣</h2>
+<p>AUCTION-20260726-001</p>
+<em>直播拍得</em>
+</section>
+<aside>
+<b>￥720</b>
+<span>x1</span>
+</aside>
+</a>
+<div class="dyMallOrderCoupon">拍卖订单支付后进入待发货</div>
+<footer>
+<span>含运费险服务 实付款 <b>￥720</b>
+</span>
+<div>
+<button type="button" class="isPrimary">去支付</button>
+</div>
+</footer>
+</article>
+</section>
+</main>

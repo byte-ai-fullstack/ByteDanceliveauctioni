@@ -3,129 +3,253 @@ package realtime
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	v1 "live-auction-bid/backend/api/auction/service/v1"
+	"live-auction-bid/backend/app/auction/service/internal/observability"
 )
 
 const (
-	defaultNATSURL     = nats.DefaultURL
-	defaultNATSSubject = "auction.realtime.events"
+	defaultNATSURL             = nats.DefaultURL
+	defaultNATSReconnectWait   = 500 * time.Millisecond
+	defaultNATSReconnectJitter = 500 * time.Millisecond
+	defaultNATSFlushTimeout    = 250 * time.Millisecond
+	defaultNATSDispatchTimeout = 2 * time.Second
 )
 
 type NATSBusConfig struct {
-	URL     string
-	Subject string
-	Queue   string
-	Name    string
-	Origin  string
+	URL             string
+	Name            string
+	Origin          string
+	ReconnectWait   time.Duration
+	ReconnectJitter time.Duration
+	FlushTimeout    time.Duration
+	DispatchTimeout time.Duration
 }
 
 type NATSBus struct {
-	url     string
-	subject string
-	queue   string
-	name    string
-	origin  string
+	url    string
+	name   string
+	origin string
 
-	mu   sync.Mutex
-	conn *nats.Conn
-	sub  *nats.Subscription
+	reconnectWait   time.Duration
+	reconnectJitter time.Duration
+	flushTimeout    time.Duration
+	dispatchTimeout time.Duration
+
+	mu     sync.Mutex
+	conn   *nats.Conn
+	sink   EventPublisher
+	done   <-chan struct{}
+	subs   map[string]*nats.Subscription
+	closed bool
 }
 
 func NewNATSBus(cfg NATSBusConfig) (*NATSBus, error) {
 	cfg.URL = strings.TrimSpace(cfg.URL)
-	cfg.Subject = strings.TrimSpace(cfg.Subject)
-	cfg.Queue = strings.TrimSpace(cfg.Queue)
 	cfg.Name = strings.TrimSpace(cfg.Name)
 	cfg.Origin = strings.TrimSpace(cfg.Origin)
 	if cfg.URL == "" {
 		cfg.URL = defaultNATSURL
 	}
-	if cfg.Subject == "" {
-		cfg.Subject = defaultNATSSubject
-	}
 	if cfg.Origin == "" {
 		cfg.Origin = cfg.Name
 	}
 	if cfg.Origin == "" {
-		cfg.Origin = "unknown"
+		return nil, errors.New("nats realtime bus origin is required")
 	}
 	if cfg.Name == "" {
 		cfg.Name = "live-auction-" + cfg.Origin
 	}
+	if cfg.ReconnectWait <= 0 {
+		cfg.ReconnectWait = defaultNATSReconnectWait
+	}
+	if cfg.ReconnectJitter < 0 {
+		return nil, errors.New("nats reconnect jitter cannot be negative")
+	}
+	if cfg.ReconnectJitter == 0 {
+		cfg.ReconnectJitter = defaultNATSReconnectJitter
+	}
+	if cfg.FlushTimeout <= 0 {
+		cfg.FlushTimeout = defaultNATSFlushTimeout
+	}
+	if cfg.DispatchTimeout <= 0 {
+		cfg.DispatchTimeout = defaultNATSDispatchTimeout
+	}
 	return &NATSBus{
-		url:     cfg.URL,
-		subject: cfg.Subject,
-		queue:   cfg.Queue,
-		name:    cfg.Name,
-		origin:  cfg.Origin,
+		url:             cfg.URL,
+		name:            cfg.Name,
+		origin:          cfg.Origin,
+		reconnectWait:   cfg.ReconnectWait,
+		reconnectJitter: cfg.ReconnectJitter,
+		flushTimeout:    cfg.FlushTimeout,
+		dispatchTimeout: cfg.DispatchTimeout,
+		subs:            make(map[string]*nats.Subscription),
 	}, nil
 }
 
 func (b *NATSBus) Start(ctx context.Context, sink EventPublisher) error {
-	if b == nil {
-		return errors.New("nats realtime bus is not initialized")
-	}
 	if sink == nil {
 		return errors.New("nats realtime bus sink is required")
 	}
-	conn, err := nats.Connect(b.url, nats.Name(b.name))
-	if err != nil {
-		return err
-	}
-	handler := func(msg *nats.Msg) {
-		_, _ = b.dispatchPayload(ctx, sink, string(msg.Data))
-	}
-	var sub *nats.Subscription
-	if b.queue != "" {
-		sub, err = conn.QueueSubscribe(b.subject, b.queue, handler)
-	} else {
-		sub, err = conn.Subscribe(b.subject, handler)
-	}
-	if err != nil {
-		conn.Close()
-		return err
-	}
-	if err := conn.Flush(); err != nil {
-		_ = sub.Unsubscribe()
-		conn.Close()
-		return err
-	}
-	b.mu.Lock()
-	if b.sub != nil {
-		_ = b.sub.Unsubscribe()
-	}
-	if b.conn != nil {
-		b.conn.Close()
-	}
-	b.conn = conn
-	b.sub = sub
-	b.mu.Unlock()
-	go func() {
-		<-ctx.Done()
-		_ = b.Close()
-	}()
-	return nil
+	return b.start(ctx, sink)
 }
 
-func (b *NATSBus) Publish(_ context.Context, event v1.AuctionEvent) error {
+// StartPublisher opens a publish-only connection for auction-service. It does
+// not subscribe to room subjects and therefore cannot own WebSocket fanout.
+func (b *NATSBus) StartPublisher(ctx context.Context) error {
+	return b.start(ctx, nil)
+}
+
+func (b *NATSBus) start(ctx context.Context, sink EventPublisher) error {
 	if b == nil {
 		return errors.New("nats realtime bus is not initialized")
 	}
-	payload, err := encodeRedisBusEnvelope(b.origin, event)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	conn, err := nats.Connect(
+		b.url,
+		nats.Name(b.name),
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		// Core NATS is only the realtime acceleration path. Buffering while
+		// disconnected could replay stale prices after Redis has advanced.
+		nats.ReconnectBufSize(-1),
+		nats.ReconnectWait(b.reconnectWait),
+		nats.ReconnectJitter(b.reconnectJitter, b.reconnectJitter),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			observability.RecordNATSConnectionEvent("disconnected")
+			slog.Warn("NATS realtime bus disconnected; Redis snapshot refresh remains active", "error", err)
+		}),
+		nats.ReconnectHandler(func(conn *nats.Conn) {
+			observability.RecordNATSConnectionEvent("reconnected")
+			slog.Info("NATS realtime bus reconnected", "url", conn.ConnectedUrl())
+		}),
+		nats.ErrorHandler(func(_ *nats.Conn, subscription *nats.Subscription, err error) {
+			observability.RecordNATSConnectionEvent("async_error")
+			subject := ""
+			if subscription != nil {
+				subject = subscription.Subject
+			}
+			slog.Warn("NATS realtime bus asynchronous error", "subject", subject, "error", err)
+		}),
+	)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	if b.conn != nil {
+		b.mu.Unlock()
+		conn.Close()
+		return errors.New("nats realtime bus is already started")
+	}
+	b.conn = conn
+	b.sink = sink
+	b.done = ctx.Done()
+	b.closed = false
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *NATSBus) Publish(_ context.Context, event *v1.AuctionEvent) error {
+	if b == nil {
+		return errors.New("nats realtime bus is not initialized")
+	}
+	payload, err := encodeNATSEventEnvelope(b.origin, event)
+	if err != nil {
+		return err
+	}
+	subject, err := RoomSubject(event.GetRoomId())
 	if err != nil {
 		return err
 	}
 	b.mu.Lock()
 	conn := b.conn
+	closed := b.closed
 	b.mu.Unlock()
-	if conn == nil || !conn.IsConnected() {
-		return errors.New("nats realtime bus is not connected")
+	if conn == nil || closed || !conn.IsConnected() {
+		observability.RecordNATSPublish("dropped_disconnected")
+		return nil
 	}
-	return conn.Publish(b.subject, []byte(payload))
+	if err := conn.Publish(subject, []byte(payload)); err != nil {
+		if isTransientNATSError(err) {
+			observability.RecordNATSPublish("dropped_disconnected")
+			return nil
+		}
+		observability.RecordNATSPublish("error")
+		return err
+	}
+	observability.RecordNATSPublish("published")
+	return nil
+}
+
+// RetainRoom subscribes this gateway to the exact room subject. It intentionally
+// does not use a queue group: every gateway with local viewers must receive the
+// room event.
+func (b *NATSBus) RetainRoom(_ context.Context, roomID string) error {
+	if b == nil {
+		return errors.New("nats realtime bus is not initialized")
+	}
+	subject, err := RoomSubject(roomID)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conn == nil || b.sink == nil || b.closed {
+		return errors.New("nats realtime bus is not started")
+	}
+	if _, exists := b.subs[roomID]; exists {
+		return nil
+	}
+	done := b.done
+	sink := b.sink
+	dispatchTimeout := b.dispatchTimeout
+	sub, err := b.conn.Subscribe(subject, func(msg *nats.Msg) {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		dispatchCtx, cancel := context.WithTimeout(context.Background(), dispatchTimeout)
+		defer cancel()
+		_, _ = b.dispatchPayload(dispatchCtx, sink, string(msg.Data))
+	})
+	if err != nil {
+		return err
+	}
+	if b.conn.IsConnected() {
+		err = b.conn.FlushTimeout(b.flushTimeout)
+	}
+	if err != nil && !isTransientNATSError(err) {
+		_ = sub.Unsubscribe()
+		return err
+	}
+	b.subs[roomID] = sub
+	observability.SetNATSSubscriptions(len(b.subs))
+	return nil
+}
+
+// ReleaseRoom removes the exact room subscription after the last local viewer
+// leaves. Repeated releases are safe.
+func (b *NATSBus) ReleaseRoom(roomID string) error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	sub := b.subs[roomID]
+	if sub == nil {
+		return nil
+	}
+	delete(b.subs, roomID)
+	observability.SetNATSSubscriptions(len(b.subs))
+	return sub.Unsubscribe()
 }
 
 func (b *NATSBus) Close() error {
@@ -133,12 +257,16 @@ func (b *NATSBus) Close() error {
 		return nil
 	}
 	b.mu.Lock()
-	sub := b.sub
 	conn := b.conn
-	b.sub = nil
+	subs := b.subs
+	b.subs = make(map[string]*nats.Subscription)
 	b.conn = nil
+	b.sink = nil
+	b.done = nil
+	b.closed = true
 	b.mu.Unlock()
-	if sub != nil {
+	observability.SetNATSSubscriptions(0)
+	for _, sub := range subs {
 		_ = sub.Unsubscribe()
 	}
 	if conn != nil {
@@ -147,6 +275,14 @@ func (b *NATSBus) Close() error {
 	return nil
 }
 
+func isTransientNATSError(err error) bool {
+	return errors.Is(err, nats.ErrConnectionReconnecting) ||
+		errors.Is(err, nats.ErrDisconnected) ||
+		errors.Is(err, nats.ErrReconnectBufExceeded) ||
+		errors.Is(err, nats.ErrTimeout) ||
+		errors.Is(err, nats.ErrNoServers)
+}
+
 func (b *NATSBus) dispatchPayload(ctx context.Context, sink EventPublisher, payload string) (bool, error) {
-	return dispatchRedisBusPayload(ctx, b.origin, sink, payload)
+	return dispatchNATSEvent(ctx, b.origin, sink, payload)
 }

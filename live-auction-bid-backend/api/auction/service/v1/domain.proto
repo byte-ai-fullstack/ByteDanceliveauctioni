@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package auction.service.v1;
+
+option go_package = "live-auction-bid/backend/api/auction/service/v1;v1";
+
+import "auction/service/v1/auction.proto";
+
+// DomainEventMetadataV1 identifies one MySQL-committed domain message.
+message DomainEventMetadataV1 {
+  string message_id = 1;
+  string causation_id = 2;
+  string trace_id = 3;
+  uint32 schema_version = 4;
+  int64 occurred_at_unix_ms = 5;
+}
+
+// BidAcceptedDomainEventV1 is published after the accepted bid is projected.
+message BidAcceptedDomainEventV1 {
+  DomainEventMetadataV1 metadata = 1;
+  string lot_id = 2;
+  string room_id = 3;
+  string bid_id = 4;
+  string user_id = 5;
+  int64 amount_fen = 6;
+  string currency = 7;
+  int64 lot_version = 8;
+}
+
+// LotSettledDomainEventV1 is published after terminal lot state is committed.
+message LotSettledDomainEventV1 {
+  DomainEventMetadataV1 metadata = 1;
+  string lot_id = 2;
+  string room_id = 3;
+  string winner_user_id = 4;
+  int64 final_price_fen = 5;
+  string currency = 6;
+  string order_id = 7;
+  int64 lot_version = 8;
+}
+
+// OrderCreatedDomainEventV1 is published after the auction order is committed.
+message OrderCreatedDomainEventV1 {
+  DomainEventMetadataV1 metadata = 1;
+  string order_id = 2;
+  string lot_id = 3;
+  string room_id = 4;
+  string buyer_user_id = 5;
+  int64 total_amount_fen = 6;
+  string currency = 7;
+  int64 lot_version = 8;
+}
+
+// LotStateDomainEventV1 is a complete versioned search projection document.
+message LotStateDomainEventV1 {
+  DomainEventMetadataV1 metadata = 1;
+  string lot_id = 2;
+  string room_id = 3;
+  string main_account_id = 4;
+  int64 lot_version = 5;
+  LotStatus status = 6;
+  string title = 7;
+  string description = 8;
+  string category = 9;
+  repeated string tags = 10;
+  string image_url = 11;
+  int64 current_price_fen = 12;
+  string currency = 13;
+  int64 ends_at_unix_ms = 14;
+  string content_hash = 15;
+  int64 start_price_fen = 16;
+  int64 starts_at_unix_ms = 17;
+}
+
+// OrderEnrichmentRequestedDomainEventV1 triggers non-core address/shop enrichment.
+message OrderEnrichmentRequestedDomainEventV1 {
+  DomainEventMetadataV1 metadata = 1;
+  string order_id = 2;
+  string lot_id = 3;
+  string address_id = 4;
+  string shop_id = 5;
+}

@@ -6,7 +6,7 @@ export function getServerOffsetMs(serverTimeUnixMs?: number | string): number {
   return serverTime - Date.now();
 }
 
-export function getServerNowMs(serverTimeUnixMs?: number | string): number {
+function getServerNowMs(serverTimeUnixMs?: number | string): number {
   return Date.now() + getServerOffsetMs(serverTimeUnixMs);
 }
 

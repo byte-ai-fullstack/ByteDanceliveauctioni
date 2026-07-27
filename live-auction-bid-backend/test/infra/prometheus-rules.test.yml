@@ -1,0 +1,335 @@
+rule_files:
+  - ../../deploy/prometheus/rules/target-infrastructure.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: target infrastructure availability alerts fire
+    interval: 1m
+    input_series:
+      - series: 'up{job="kafka"}'
+        values: '0+0x3'
+      - series: 'up{job="mysql"}'
+        values: '0+0x3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AuctionKafkaExporterDown
+        exp_alerts:
+          - exp_labels: {severity: critical, component: kafka, job: kafka}
+            exp_annotations:
+              summary: Kafka metrics endpoint is unavailable
+              description: Kafka health and consumer lag are no longer observable.
+      - eval_time: 1m
+        alertname: AuctionMySQLExporterDown
+        exp_alerts:
+          - exp_labels: {severity: critical, component: mysql, job: mysql}
+            exp_annotations:
+              summary: MySQL metrics endpoint is unavailable
+              description: Database connections, durability and replication safety are no longer observable.
+
+  - name: target infrastructure safety alerts fire
+    interval: 1m
+    input_series:
+      - series: 'kafka_brokers'
+        values: '0+0x6'
+      - series: 'mysql_global_status_threads_connected'
+        values: '500+0x6'
+      - series: 'mysql_global_variables_max_connections'
+        values: '600+0x6'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AuctionKafkaNoBroker
+        exp_alerts:
+          - exp_labels: {severity: critical, component: kafka}
+            exp_annotations:
+              summary: Kafka has no observable broker
+              description: Runtime facts cannot be durably published; the projection gate must close.
+      - eval_time: 5m
+        alertname: AuctionMySQLConnectionsHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: mysql}
+            exp_annotations:
+              summary: MySQL connections exceed 80 percent of the configured maximum
+              description: Compare per-workload pool usage with the connection budget before admission failures begin.
+
+  - name: optional search availability follows gateway requirements
+    interval: 1m
+    input_series:
+      - series: 'up{job="index-es"}'
+        values: '0+0x4'
+      - series: 'up{job="index-pgvector"}'
+        values: '0+0x4'
+      - series: 'auction_search_component_required{job="auction-gateway",component="index-es"}'
+        values: '1+0x4'
+      - series: 'auction_search_component_required{job="auction-gateway",component="index-pgvector"}'
+        values: '0+0x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AuctionElasticsearchIndexerDown
+        exp_alerts:
+          - exp_labels: {severity: warning, component: index-es, job: index-es}
+            exp_annotations:
+              summary: No Elasticsearch index consumer is observable
+              description: Keyword results may be stale; bidding and authoritative MySQL reads must remain independent.
+      - eval_time: 2m
+        alertname: AuctionPGVectorIndexerDown
+        exp_alerts: []
+
+  - name: buyer indexed search retrieval p99 alert fires by source
+    interval: 1m
+    input_series:
+      - series: 'auction_search_retrieval_duration_ms_bucket{source="pgvector",result="ok",le="500"}'
+        values: '0+0x16'
+      - series: 'auction_search_retrieval_duration_ms_bucket{source="pgvector",result="ok",le="1000"}'
+        values: '0+0x16'
+      - series: 'auction_search_retrieval_duration_ms_bucket{source="pgvector",result="ok",le="2500"}'
+        values: '0+100x16'
+      - series: 'auction_search_retrieval_duration_ms_bucket{source="pgvector",result="ok",le="+Inf"}'
+        values: '0+100x16'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AuctionBuyerSearchRetrievalP99High
+        exp_alerts:
+          - exp_labels: {severity: warning, component: gateway-search, source: pgvector}
+            exp_annotations:
+              summary: Buyer indexed-search retrieval p99 exceeds one second
+              description: Inspect the source label and separate Elasticsearch query latency from embedding plus pgvector latency; external LLM generation is not part of this SLO.
+
+  - name: projection gate unavailable rejection and headroom alerts fire
+    interval: 1m
+    input_series:
+      - series: 'auction_projection_gate_ready{job="auction-service",instance="service-a"}'
+        values: '0+0x3'
+      - series: 'auction_projection_gate_rejection_total{job="auction-service",instance="service-a",reason="lag_limit"}'
+        values: '0+1x3'
+      - series: 'auction_projection_gate_retention_headroom_ms{job="auction-service",instance="service-a"}'
+        values: '1000+0x3'
+      - series: 'auction_projection_gate_oldest_age_ms{job="auction-service",instance="service-a"}'
+        values: '25000+0x3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AuctionProjectionGateUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, component: auction-service}
+            exp_annotations:
+              summary: Every auction-service projection gate is closed
+              description: New starts, bids and live configuration changes are being rejected; inspect the bounded gate reason, Kafka Runtime Topic and MySQL projector offsets.
+      - eval_time: 1m
+        alertname: AuctionProjectionGateRejectingCommands
+        exp_alerts:
+          - exp_labels: {severity: warning, component: auction-service}
+            exp_annotations:
+              summary: The end-to-end projection gate rejected runtime commands
+              description: Group rejections by the bounded reason label; cancel and expiry-close commands remain available while the projector recovers.
+      - eval_time: 1m
+        alertname: AuctionProjectionRetentionHeadroomLow
+        exp_alerts:
+          - exp_labels: {severity: critical, component: projector}
+            exp_annotations:
+              summary: Runtime Topic projection retention headroom is below seven days
+              description: Restore projector progress or execute the audited repair workflow before the MySQL offset crosses the Kafka retention cliff.
+      - eval_time: 1m
+        alertname: AuctionProjectionOldestAgeHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: projector}
+            exp_annotations:
+              summary: The oldest unprojected Runtime record is approaching 30 seconds
+              description: Restore projector throughput before the auction-service admission gate reaches its default oldest-age limit.
+
+  - name: projection gate replica disagreement alerts
+    interval: 1m
+    input_series:
+      - series: 'auction_projection_gate_ready{job="auction-service",instance="service-a"}'
+        values: '0+0x3'
+      - series: 'auction_projection_gate_ready{job="auction-service",instance="service-b"}'
+        values: '1+0x3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AuctionProjectionGateDegraded
+        exp_alerts:
+          - exp_labels: {severity: warning, component: auction-service}
+            exp_annotations:
+              summary: Auction-service projection gate state differs between replicas
+              description: Compare Kafka/MySQL reachability, partition visibility and snapshot age across auction-service instances before the remaining admission capacity closes.
+
+  - name: order visibility warning and critical alerts fire
+    interval: 1m
+    input_series:
+      - series: 'auction_order_visibility_lag_ms{job="domain-relay",instance="relay-a"}'
+        values: '35000+0x3'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AuctionOrderVisibilityLagHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: domain-relay, job: domain-relay, instance: relay-a}
+            exp_annotations:
+              summary: A projected order has remained CREATING beyond 5 seconds
+              description: Inspect Runtime projection lag and the order.created domain outbox route before buyers exceed the visibility SLO.
+      - eval_time: 1m
+        alertname: AuctionOrderVisibilityLagCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, component: domain-relay, job: domain-relay, instance: relay-a}
+            exp_annotations:
+              summary: A projected order has remained CREATING beyond 30 seconds
+              description: Restore Projector or domain-relay progress; buyers must continue receiving HTTP 202 rather than a false not-found response.
+
+  - name: nats room subscription drift fires after sustained mismatch
+    interval: 1m
+    input_series:
+      - series: 'auction_nats_subscriptions{job="gateway",instance="gateway-a"}'
+        values: '2+0x6'
+      - series: 'auction_ws_connections{job="gateway",instance="gateway-a",room_id="room-a",scope="public"}'
+        values: '1+0x6'
+      - series: 'auction_ws_connections{job="gateway",instance="gateway-a",room_id="room-a",scope="admin"}'
+        values: '1+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AuctionNATSSubscriptionDrift
+        exp_alerts:
+          - exp_labels: {severity: warning, component: gateway, job: gateway, instance: gateway-a}
+            exp_annotations:
+              summary: Gateway NATS room subscriptions differ from viewed rooms
+              description: Inspect Hub retain/release and NATS reconnect handling; sustained drift can leak subscriptions or leave active rooms without realtime delivery.
+
+  - name: nats room subscription count matches multiple scopes in one room
+    interval: 1m
+    input_series:
+      - series: 'auction_nats_subscriptions{job="gateway",instance="gateway-a"}'
+        values: '1+0x6'
+      - series: 'auction_ws_connections{job="gateway",instance="gateway-a",room_id="room-a",scope="public"}'
+        values: '2+0x6'
+      - series: 'auction_ws_connections{job="gateway",instance="gateway-a",room_id="room-a",scope="admin"}'
+        values: '1+0x6'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AuctionNATSSubscriptionDrift
+        exp_alerts: []
+
+  - name: durable disk warning and critical alerts fire
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/",fstype="ext4",instance="node-a"}'
+        values: '10+0x6'
+      - series: 'node_filesystem_size_bytes{mountpoint="/",fstype="ext4",instance="node-a"}'
+        values: '100+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AuctionDurableDiskUsageHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: storage, mountpoint: /, fstype: ext4, instance: node-a}
+            exp_annotations:
+              summary: A durable host filesystem exceeds 75 percent usage
+              description: Identify the mounted Kafka, Redis, MySQL, Elasticsearch or PostgreSQL data path and add headroom before it reaches the critical watermark.
+      - eval_time: 1m
+        alertname: AuctionDurableDiskUsageCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, component: storage, mountpoint: /, fstype: ext4, instance: node-a}
+            exp_annotations:
+              summary: A durable host filesystem exceeds 85 percent usage
+              description: Close the projection gate or freeze nonessential writers and restore disk headroom immediately.
+
+  - name: persistent volume warning and critical alerts fire
+    interval: 1m
+    input_series:
+      - series: 'kubelet_volume_stats_used_bytes{namespace="auction-data",persistentvolumeclaim="kafka-data-0"}'
+        values: '90+0x6'
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="auction-data",persistentvolumeclaim="kafka-data-0"}'
+        values: '100+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AuctionPersistentVolumeUsageHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: storage, namespace: auction-data, persistentvolumeclaim: kafka-data-0}
+            exp_annotations:
+              summary: A Kubernetes persistent volume exceeds 75 percent usage
+              description: Map the PVC to its durable auction store and expand or clean it before the critical watermark.
+      - eval_time: 1m
+        alertname: AuctionPersistentVolumeUsageCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, component: storage, namespace: auction-data, persistentvolumeclaim: kafka-data-0}
+            exp_annotations:
+              summary: A Kubernetes persistent volume exceeds 85 percent usage
+              description: Close the projection gate or freeze nonessential writers and restore PVC headroom immediately.
+
+  - name: durable host memory warning and critical alerts fire
+    interval: 1m
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{instance="node-a"}'
+        values: '10+0x6'
+      - series: 'node_memory_MemTotal_bytes{instance="node-a"}'
+        values: '100+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AuctionHostMemoryUsageHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: memory, instance: node-a}
+            exp_annotations:
+              summary: A durable-store host exceeds 75 percent memory usage
+              description: Identify the Kafka, Redis, MySQL, Elasticsearch or PostgreSQL process consuming the host budget before swap or OOM pressure begins.
+      - eval_time: 1m
+        alertname: AuctionHostMemoryUsageCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, component: memory, instance: node-a}
+            exp_annotations:
+              summary: A durable-store host exceeds 85 percent memory usage
+              description: Freeze nonessential work, preserve the core event path and restore host memory headroom immediately.
+
+  - name: Redis bounded memory alerts fire
+    interval: 1m
+    input_series:
+      - series: 'redis_memory_used_bytes{instance="redis-a"}'
+        values: '90+0x6'
+      - series: 'redis_memory_max_bytes{instance="redis-a"}'
+        values: '100+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AuctionRedisMemoryUsageHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: redis, instance: redis-a}
+            exp_annotations:
+              summary: Redis exceeds 75 percent of maxmemory
+              description: Reduce retained runtime data or expand Redis before noeviction rejects a core state transition.
+      - eval_time: 1m
+        alertname: AuctionRedisMemoryUsageCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, component: redis, instance: redis-a}
+            exp_annotations:
+              summary: Redis exceeds 85 percent of maxmemory
+              description: Close the projection gate for new work and restore Redis memory headroom without enabling eviction.
+
+  - name: missing Redis memory limit alerts
+    interval: 1m
+    input_series:
+      - series: 'redis_memory_max_bytes{instance="redis-unbounded"}'
+        values: '0+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AuctionRedisMemoryLimitMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, component: redis, instance: redis-unbounded}
+            exp_annotations:
+              summary: Redis has no enforceable maxmemory limit
+              description: Configure a tested maxmemory below the VM or container limit while retaining noeviction; host OOM is not an acceptable capacity boundary.
+
+  - name: Elasticsearch heap warning and critical alerts fire
+    interval: 1m
+    input_series:
+      - series: 'elasticsearch_jvm_memory_used_bytes{area="heap",node="es-a"}'
+        values: '90+0x6'
+      - series: 'elasticsearch_jvm_memory_max_bytes{node="es-a"}'
+        values: '100+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AuctionElasticsearchHeapUsageHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: elasticsearch, node: es-a}
+            exp_annotations:
+              summary: Elasticsearch JVM heap exceeds 75 percent
+              description: Throttle indexing or add search capacity while auction queries continue through their authoritative fallback.
+      - eval_time: 1m
+        alertname: AuctionElasticsearchHeapUsageCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, component: elasticsearch, node: es-a}
+            exp_annotations:
+              summary: Elasticsearch JVM heap exceeds 85 percent
+              description: Disable nonessential indexing and preserve MySQL fallback until heap and GC pressure recover.

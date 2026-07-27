@@ -25,7 +25,7 @@ import {
   RESULT_CODE_USER_NOT_FOUND,
 } from './types';
 
-export class ApiResultError extends Error {
+class ApiResultError extends Error {
   readonly result: ReplyResult;
 
   constructor(result: ReplyResult) {
@@ -111,5 +111,3 @@ export function publicResultMessage(result?: Partial<ReplyResult>, fallback = 'è
   }
   return errorMessages[code] || businessMessages[rawMessage] || fallback;
 }
-
-export { normalizeAuctionEvent } from './normalizers';

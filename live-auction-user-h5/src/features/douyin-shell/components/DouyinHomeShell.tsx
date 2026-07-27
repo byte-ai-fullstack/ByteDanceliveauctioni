@@ -932,21 +932,33 @@ export function DouyinHomeShell() {
   const [remoteVideoItems, setRemoteVideoItems] = useState<FeedItem[]>([]);
   const touchStart = useRef({ x: 0, y: 0, at: 0 });
   const wheelGesture = useRef({ x: 0, y: 0, lastAt: 0, lockedUntil: 0 });
-  const restoredLiveRoomApplied = useRef(false);
   const fallbackVideoItems = useMemo(() => shuffleItems(VIDEO_FEED_ITEMS), []);
   const liveDemoSources = useMemo(() => shuffleItems(resolveLivePlaylist()), []);
   const videoItems = remoteVideoItems.length ? remoteVideoItems : fallbackVideoItems;
-  const liveItems = useMemo(() => liveRoomFeedItems(shuffleItems(publicRooms), liveDemoSources), [liveDemoSources, publicRooms]);
+  const liveItems = useMemo(() => liveRoomFeedItems(publicRooms, liveDemoSources), [liveDemoSources, publicRooms]);
   const channelFeeds = useMemo(() => CHANNELS.map((_, index) => channelItems(index, liveItems, videoItems)), [liveItems, videoItems]);
   const items = channelFeeds[channelIndex] || FEED_ITEMS;
   const itemIndex = clampIndex(itemIndexes[channelIndex] || 0, items.length);
 
   useEffect(() => {
     let disposed = false;
-    void listPublicRooms().then((rooms) => {
-      if (!disposed) setPublicRooms(rooms);
-    }).catch(() => {
-      if (!disposed) setPublicRooms([]);
+    void listPublicRooms().catch(() => []).then((rooms) => {
+      if (disposed) return;
+      const nextRooms = shuffleItems(rooms);
+      setPublicRooms(nextRooms);
+      const targetLiveRoomId = restoredHomeState?.targetLiveRoomId;
+      if (!targetLiveRoomId) return;
+      const targetIndex = liveRoomFeedItems(nextRooms, liveDemoSources)
+        .findIndex((item) => liveRoomIdFromHref(item.liveHref) === targetLiveRoomId);
+      if (targetIndex < 0) return;
+      setBaseIndex(1);
+      setChannelIndex(LIVE_CHANNEL_INDEX);
+      setItemIndexes((current) => {
+        const next = current.slice();
+        next[LIVE_CHANNEL_INDEX] = targetIndex;
+        return next;
+      });
+      setPausedId('');
     }).finally(() => {
       if (!disposed) setPublicRoomsLoaded(true);
     });
@@ -958,27 +970,7 @@ export function DouyinHomeShell() {
     return () => {
       disposed = true;
     };
-  }, []);
-
-  useEffect(() => {
-    if (restoredLiveRoomApplied.current) return;
-    const targetLiveRoomId = restoredHomeState?.targetLiveRoomId;
-    if (!targetLiveRoomId || !liveItems.length) return;
-
-    const liveFeed = channelFeeds[LIVE_CHANNEL_INDEX] || [];
-    const targetIndex = liveFeed.findIndex((item) => liveRoomIdFromHref(item.liveHref) === targetLiveRoomId);
-    if (targetIndex < 0) return;
-
-    restoredLiveRoomApplied.current = true;
-    setBaseIndex(1);
-    setChannelIndex(LIVE_CHANNEL_INDEX);
-    setItemIndexes((current) => {
-      const next = current.slice();
-      next[LIVE_CHANNEL_INDEX] = targetIndex;
-      return next;
-    });
-    setPausedId('');
-  }, [channelFeeds, liveItems.length, restoredHomeState?.targetLiveRoomId]);
+  }, [liveDemoSources, restoredHomeState]);
 
   useEffect(() => {
     const syncEntryPath = () => {

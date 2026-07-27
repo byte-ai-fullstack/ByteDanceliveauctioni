@@ -70,7 +70,7 @@ PATH=/home/ye/go/bin:$PATH make api PROTOC=/tmp/openclaw-tools/protoc/bin/protoc
 
 `openapi/auction.openapi.json` 是跟随 proto HTTP binding 同步的前端生成合同；Admin 可通过 `npm run generate:api` 生成 `src/shared/api/generated/auction.schema.ts`。不再保留 `domain_http.go` / `order_http.go` / `shop_http.go` 的业务双路由兼容。
 
-仍保留手写的不是普通业务 JSON API：`/healthz`、`/readyz`、`/metrics`、`/workerz`、`/clusterz`、`/api/realtime/ws-ticket`、`/ws/rooms/*`、`/api/uploads/images`。
+仍保留手写的不是普通业务 JSON API：`/healthz`、`/readyz`、`/metrics`、`/api/realtime/ws-ticket`、`/ws/rooms/*`、`/api/uploads/images`。
 
 ## 状态和事件合同
 

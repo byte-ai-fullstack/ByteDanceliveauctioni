@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"live-auction-bid/backend/app/auction/service/internal/orderenrichment"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/apperr"
 )
 
@@ -160,6 +161,8 @@ type UserOrder struct {
 	PaymentID               string                   `json:"paymentId,omitempty"`
 	Title                   string                   `json:"title"`
 	ShopName                string                   `json:"shopName"`
+	EnrichmentStatus        orderenrichment.Status   `json:"enrichmentStatus,omitempty"`
+	EnrichmentUpdatedAtMs   int64                    `json:"enrichmentUpdatedAtUnixMs,omitempty"`
 	TotalAmount             int64                    `json:"totalAmount"`
 	Currency                string                   `json:"currency"`
 	ShippingAddressID       string                   `json:"shippingAddressId,omitempty"`

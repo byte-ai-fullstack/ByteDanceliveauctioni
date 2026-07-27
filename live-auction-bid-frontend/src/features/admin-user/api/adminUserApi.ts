@@ -2,7 +2,7 @@ import { apiRequest } from '../../../shared/api/httpClient';
 import { normalizeUser } from '../../../shared/api/normalizers';
 import { toQueryString } from '../../../shared/api/query';
 import { assertOkResult } from '../../../shared/api/result';
-import type { ReplyResult, RoleCode, User, UserStatus } from '../../../shared/api/types';
+import type { AdminUserReply, AdminUsersReply, RoleCode, User, UserStatus } from '../../../shared/api/types';
 
 export type AdminUsersQuery = {
   page?: number;
@@ -17,19 +17,6 @@ export type AdminUsersPage = {
   total: number;
   page: number;
   pageSize: number;
-};
-
-type AdminUserReply = {
-  user?: unknown;
-  result?: ReplyResult;
-};
-
-type AdminUsersReply = {
-  users?: unknown[];
-  total?: number | string;
-  page?: number | string;
-  pageSize?: number | string;
-  result?: ReplyResult;
 };
 
 function requireUser(reply: AdminUserReply) {
@@ -56,7 +43,7 @@ export async function adminCreateUser(payload: { username: string; password: str
   })));
 }
 
-export async function listAdminUsers(query: AdminUsersQuery = {}): Promise<AdminUsersPage> {
+export async function listAdminUsers(query: AdminUsersQuery = {}, signal?: AbortSignal): Promise<AdminUsersPage> {
   const page = query.page ?? 1;
   const pageSize = query.pageSize ?? 20;
   const reply = assertOkResult(await apiRequest<AdminUsersReply>({
@@ -69,6 +56,7 @@ export async function listAdminUsers(query: AdminUsersQuery = {}): Promise<Admin
     })}`,
     method: 'GET',
     operation: 'admin-list-users',
+    signal,
   }));
   return {
     users: requireArray(reply.users, 'users').map(normalizeUser),

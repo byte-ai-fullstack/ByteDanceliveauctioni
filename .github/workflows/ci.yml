@@ -1,0 +1,217 @@
+name: public-monorepo-ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-monorepo-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: live-auction-bid-backend/go.mod
+          cache: false
+      - name: Scan clean tracked release snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_root="$(mktemp -d)"
+          trap 'rm -rf -- "$release_root"' EXIT
+          mkdir "$release_root/release"
+          git archive --format=tar HEAD | tar -xf - -C "$release_root/release"
+          test ! -e "$release_root/release/live-auction-bid-backend/deploy/.env"
+          go run "github.com/zricethezav/gitleaks/v8@v${GITLEAKS_VERSION}" \
+            dir --redact=100 --no-banner \
+            --config "$release_root/release/.gitleaks.toml" \
+            "$release_root/release"
+
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.4.9@sha256:c36050afdca850f23cef85703f84c7531a5ae155a11b5ee1c60acb09937c4084
+        env:
+          MYSQL_DATABASE: live_auction
+          MYSQL_ROOT_PASSWORD: auction_root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pauction_root --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7.2.4-alpine@sha256:c8bb255c3559b3e458766db810aa7b3c7af1235b204cfdb304e79ff388fe1a5a
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    defaults:
+      run:
+        working-directory: live-auction-bid-backend
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ripgrep
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: live-auction-bid-backend/go.mod
+          cache-dependency-path: live-auction-bid-backend/go.sum
+      - name: Verify dependencies
+        run: go mod verify
+      - name: Apply schema from empty MySQL
+        env:
+          AUCTION_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?charset=utf8mb4
+        run: go run ./app/auction/service/cmd/migrate up
+      - name: Run Go tests and capture evidence
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          go test -json -coverprofile=coverage.out ./... | tee test-results/go-test.json
+      - name: Run database and Redis integration boundaries
+        env:
+          AUCTION_PROJECTOR_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+          AUCTION_DOMAIN_RELAY_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+          AUCTION_ENRICHMENT_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+          AUCTION_TEST_REDIS_ADDR: 127.0.0.1:6379
+        shell: bash
+        run: |
+          go test ./app/auction/service/internal/worker/projector -run '^TestIntegrationSQLStore' -count=1
+          go test ./app/auction/service/internal/worker/domainrelay -run '^TestIntegrationSQLStore' -count=1
+          go test ./app/auction/service/internal/worker/enrichment -run '^TestIntegrationSQLStore' -count=1
+          go test ./app/auction/service/internal/data -run '^TestRuntimeLua(LinearizesTailBidAgainstClose|KeepsExtendedLotLiveAcrossOriginalDeadline)$' -count=1
+      - name: Verify generated/configured boundaries
+        shell: bash
+        run: |
+          bash scripts/check-kubernetes-manifests.sh
+          bash scripts/check-l3-runtime-wiring.sh
+          bash scripts/check-zero-residue.sh
+      - name: Build all Go packages
+        run: go build ./...
+      - name: Archive backend evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-evidence-${{ github.run_id }}
+          path: |
+            live-auction-bid-backend/test-results/go-test.json
+            live-auction-bid-backend/coverage.out
+          if-no-files-found: warn
+          retention-days: 14
+
+  pc-frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+    defaults:
+      run:
+        working-directory: live-auction-bid-frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: live-auction-bid-frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint:admin
+      - run: npm run build
+
+  h5-frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: live-auction-user-h5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: live-auction-user-h5/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run check:presentation-freeze
+      - run: npm run check:contract-guardrails
+      - run: npm test
+      - run: npm run check:external-assets
+      - run: npm run build
+
+  infrastructure-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: live-auction-bid-backend
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ripgrep
+      - name: Configure Elasticsearch host limit
+        run: sudo sysctl -w vm.max_map_count=262144
+      - name: Run infrastructure smoke and archive output
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          bash scripts/run-l2-infra-smoke.sh 2>&1 | tee test-results/l2-infra-smoke.log
+      - name: Archive infrastructure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: infrastructure-smoke-${{ github.run_id }}
+          path: live-auction-bid-backend/test-results/l2-infra-smoke.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  infrastructure-ha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: live-auction-bid-backend
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ripgrep
+      - name: Run quorum and failover drill
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          bash scripts/run-l2-ha-fault-drill.sh 2>&1 | tee test-results/l2-ha-fault-drill.log
+      - name: Archive HA evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: infrastructure-ha-${{ github.run_id }}
+          path: live-auction-bid-backend/test-results/l2-ha-fault-drill.log
+          if-no-files-found: warn
+          retention-days: 14

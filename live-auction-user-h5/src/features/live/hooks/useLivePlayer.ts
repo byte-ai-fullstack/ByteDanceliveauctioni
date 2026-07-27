@@ -33,8 +33,7 @@ export function resolveLiveSource() {
 }
 
 export function resolveInitialLiveSource() {
-  const playlist = resolveLivePlaylist();
-  return playlist[Math.floor(Math.random() * playlist.length)] || resolveLiveSource();
+  return resolveLiveSource();
 }
 
 export function resolveNextLiveSource(currentSource: string) {

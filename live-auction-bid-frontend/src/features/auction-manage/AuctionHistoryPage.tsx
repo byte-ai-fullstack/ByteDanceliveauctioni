@@ -1,56 +1,19 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle, BadgeCheck, ChevronLeft, ChevronRight, Clock3, FileClock, Image as ImageIcon, Package, RefreshCw, Search, ShieldAlert, Trophy, X, XCircle } from 'lucide-react';
-import { listAdminLots, type AdminLotsQuery } from '../auction/api/auctionApi';
+import { AppLink } from '../../shared/router/AppLink';
+import type { AdminLotsQuery } from '../auction/api/auctionApi';
 import { HISTORY_LOT_STATUS_FILTERS, isSettlementLot, lotStatusLabel, lotStatusTone, settlementOutcomeDisplay } from '../../entities/auction/model/auctionStatus';
-import { getLotResult } from '../order/api/orderApi';
 import type { OrderSummary } from '../../entities/order/model/orderTypes';
 import type { Lot } from '../../shared/api/types';
-import { resultMessage } from '../../shared/api/result';
 import { formatDateTimeText, formatDurationText, formatMoneyText } from '../../shared/lib/format';
-import { StudioBadge, StudioButton, StudioCard, StudioEmptyState, StudioErrorState, StudioField, StudioMetricCard, StudioPageHeader, StudioTableSkeleton, StudioToastViewport, useStudioToast } from '../../pages/host-console/components/studio-ui';
+import { StudioBadge, StudioButton, StudioCard, StudioEmptyState, StudioErrorState, StudioField, StudioMetricCard, StudioPageHeader, StudioTableSkeleton } from '../../pages/host-console/components/studio-ui';
+import { useAuctionHistoryPage } from './model/useAuctionHistoryPage';
 
 const DEFAULT_PAGE_SIZE = 10;
 
 export function AuctionHistoryPage({ roomId }: { roomId: string }) {
-  const [query, setQuery] = useState<AdminLotsQuery>({ page: 1, pageSize: DEFAULT_PAGE_SIZE, roomId, view: 'history' });
-  const [lots, setLots] = useState<Lot[]>([]);
-  const [ordersByLotId, setOrdersByLotId] = useState<Record<string, OrderSummary | null>>({});
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [selectedLot, setSelectedLot] = useState<Lot | null>(null);
-  const { toasts, showToast } = useStudioToast();
-  const totalPages = Math.max(1, Math.ceil(total / (query.pageSize || DEFAULT_PAGE_SIZE)));
-  const currentPage = query.page || 1;
-
-  const goPrevPage = () => setQuery((c) => ({ ...c, page: Math.max(1, (c.page || 1) - 1) }));
-  const goNextPage = () => setQuery((c) => ({ ...c, page: (c.page || 1) + 1 }));
-
-  const syncLots = async (nextQuery = query) => {
-    setLoading(true);
-    setError('');
-    try {
-      const page = await listAdminLots({ ...nextQuery, roomId, view: 'history', pageSize: DEFAULT_PAGE_SIZE });
-      const orderMap = await loadHistoryOrders(page.lots);
-      setLots(page.lots);
-      setOrdersByLotId(orderMap);
-      setTotal(page.total);
-      setQuery((current) => ({ ...current, roomId, view: 'history', page: page.page, pageSize: DEFAULT_PAGE_SIZE }));
-    } catch (e) {
-      const message = resultMessage(e);
-      setError(message);
-      showToast({ id: 'auction-history-sync-failed', tone: 'danger', title: '历史记录同步失败', description: message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateQuery = (patch: Partial<AdminLotsQuery>) => {
-    setQuery((current) => ({ ...current, ...patch, view: 'history', page: patch.page ?? 1 }));
-  };
-
-  useEffect(() => { void syncLots({ ...query, roomId, view: 'history' }); }, [roomId]);
-  useEffect(() => { void syncLots(query); }, [query.page, query.status]);
+  const { query, lots, ordersByLotId, total, loading, error, totalPages, currentPage, goPrevPage, goNextPage, syncLots, updateQuery } = useAuctionHistoryPage(roomId, DEFAULT_PAGE_SIZE);
 
   const metrics = useMemo(() => ({
     settled: lots.filter(isSettlementLot).length,
@@ -59,13 +22,12 @@ export function AuctionHistoryPage({ roomId }: { roomId: string }) {
   }), [lots]);
 
   return <section className="postLivePage auctionHistoryPage">
-    <StudioToastViewport toasts={toasts} />
     <StudioCard padding="lg" className="postLiveHeader auctionHistoryHero">
       <StudioPageHeader
         eyebrow="Lot history"
         title="拍品历史记录"
         description="已落锤、已取消和异常拍品从本场队列拆出，保留给运营复盘、订单核对和取消原因审计。"
-        actions={<><a className="studioButton studioButton-secondary studioButton-md" href="/admin/auctions">返回本场队列</a><StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} loading={loading} onClick={() => void syncLots()}>{loading ? '同步中' : '刷新历史'}</StudioButton></>}
+        actions={<><AppLink className="studioButton studioButton-secondary studioButton-md" to="/admin/auctions">返回本场队列</AppLink><StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} loading={loading} onClick={() => void syncLots()}>{loading ? '同步中' : '刷新历史'}</StudioButton></>}
       />
     </StudioCard>
     {error ? <div className="auctionMgmtNotice danger"><AlertTriangle size={16} />{error}</div> : null}
@@ -93,23 +55,10 @@ export function AuctionHistoryPage({ roomId }: { roomId: string }) {
       </div>
       {lots.length ? <section className="auctionHistoryList" aria-label="拍品历史列表">
         {lots.map((lot) => <HistoryLotCard key={lot.id} lot={lot} order={ordersByLotId[lot.id]} onOpen={setSelectedLot} />)}
-      </section> : <StudioEmptyState icon={<Package size={34} />} title="暂无历史记录" description="当前筛选条件下没有已落锤、已取消或异常拍品。" action={<a className="studioButton studioButton-secondary studioButton-md" href="/admin/auctions">返回本场队列</a>} compact />}
+      </section> : <StudioEmptyState icon={<Package size={34} />} title="暂无历史记录" description="当前筛选条件下没有已落锤、已取消或异常拍品。" action={<AppLink className="studioButton studioButton-secondary studioButton-md" to="/admin/auctions">返回本场队列</AppLink>} compact />}
     </section>}
     {selectedLot ? <HistoryLotDetailDrawer lot={selectedLot} order={ordersByLotId[selectedLot.id]} onClose={() => setSelectedLot(null)} /> : null}
   </section>;
-}
-
-async function loadHistoryOrders(lots: Lot[]) {
-  const settlementLots = lots.filter(isSettlementLot);
-  const entries = await Promise.all(settlementLots.map(async (lot) => {
-    try {
-      const result = await getLotResult(lot.id);
-      return [lot.id, result.order ?? null] as const;
-    } catch {
-      return [lot.id, null] as const;
-    }
-  }));
-  return Object.fromEntries(entries);
 }
 
 function historyTimeText(lot: Lot) {

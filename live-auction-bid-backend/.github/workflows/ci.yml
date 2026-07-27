@@ -1,0 +1,341 @@
+name: backend-ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  BUF_VERSION: v1.50.0
+  GITLEAKS_VERSION: 8.30.1
+  GOLANGCI_LINT_VERSION: v2.12.2
+  GOVULNCHECK_VERSION: v1.6.0
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify module checksums
+        run: go mod verify
+
+      - name: Run default Go linters
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=8m
+
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
+
+      - name: Scan tracked source tree for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git ls-files -- deploy/.env)"
+          scan_root="$(mktemp -d)"
+          trap 'rm -rf -- "$scan_root"' EXIT
+          mkdir "$scan_root/release"
+          git archive --format=tar HEAD | tar -xf - -C "$scan_root/release"
+          test ! -e "$scan_root/release/deploy/.env"
+          go run "github.com/zricethezav/gitleaks/v8@v${GITLEAKS_VERSION}" \
+            dir --redact=100 --no-banner --config "$scan_root/release/.gitleaks.toml" "$scan_root/release"
+
+  build-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Build backend runtime image
+        run: docker build --file deploy/Dockerfile --tag live-auction-backend:${{ github.sha }} .
+
+      - name: Build Elasticsearch image
+        run: docker build --file deploy/elasticsearch/Dockerfile --tag live-auction-elasticsearch:${{ github.sha }} .
+
+  infrastructure-ha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Run quorum and failover drill
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          bash scripts/run-l2-ha-fault-drill.sh 2>&1 | tee test-results/l2-ha-fault-drill.log
+
+      - name: Archive failover evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: l2-ha-fault-drill-${{ github.run_id }}
+          path: test-results/l2-ha-fault-drill.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Configure Elasticsearch host limit
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Run target infrastructure smoke test
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          bash scripts/run-l2-infra-smoke.sh 2>&1 | tee test-results/l2-infra-smoke.log
+
+      - name: Archive infrastructure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: l2-infrastructure-${{ github.run_id }}
+          path: test-results/l2-infra-smoke.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  schema:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4.9@sha256:c36050afdca850f23cef85703f84c7531a5ae155a11b5ee1c60acb09937c4084
+        env:
+          MYSQL_DATABASE: live_auction
+          MYSQL_ROOT_PASSWORD: auction_root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pauction_root --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7.2.4-alpine@sha256:c8bb255c3559b3e458766db810aa7b3c7af1235b204cfdb304e79ff388fe1a5a
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build target schema from an empty database
+        env:
+          AUCTION_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?charset=utf8mb4
+        run: go run ./app/auction/service/cmd/migrate up
+
+      - name: Verify applied versions
+        env:
+          AUCTION_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?charset=utf8mb4
+        shell: bash
+        run: |
+          shopt -s nullglob
+          migration_files=(deploy/mysql/migrations/[0-9]*.up.sql)
+          test "${#migration_files[@]}" -gt 0
+          test "$(go run ./app/auction/service/cmd/migrate status | wc -l)" -eq "${#migration_files[@]}"
+
+      - name: Roll back and rebuild target schema
+        env:
+          AUCTION_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?charset=utf8mb4
+        shell: bash
+        run: |
+          shopt -s nullglob
+          migration_files=(deploy/mysql/migrations/[0-9]*.up.sql)
+          go run ./app/auction/service/cmd/migrate --steps "${#migration_files[@]}" down
+          test -z "$(go run ./app/auction/service/cmd/migrate status)"
+          go run ./app/auction/service/cmd/migrate up
+
+      - name: Exercise start and pre-start serialization against MySQL and Redis
+        env:
+          AUCTION_PROJECTOR_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+          AUCTION_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test ./app/auction/service/internal/data -run '^TestIntegrationRuntimeStartSerializes' -count=1
+
+      - name: Exercise anti-snipe and close-worker arbitration against Redis
+        env:
+          AUCTION_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test ./app/auction/service/internal/data -run '^TestRuntimeLua(LinearizesTailBidAgainstClose|KeepsExtendedLotLiveAcrossOriginalDeadline)$' -count=1
+
+      - name: Exercise Projector transaction against MySQL
+        env:
+          AUCTION_PROJECTOR_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+        run: go test ./app/auction/service/internal/worker/projector -run '^TestIntegrationSQLStore' -count=1
+
+      - name: Exercise auction-service projection gate offset query against MySQL
+        env:
+          AUCTION_PROJECTOR_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+        run: go test ./app/auction/service/internal/projectiongate -run '^TestIntegrationSQLSource' -count=1
+
+      - name: Exercise synthetic repair audit lifecycle against MySQL
+        env:
+          AUCTION_PROJECTOR_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+        run: go test ./app/auction/service/internal/projectionrepair -run '^TestIntegrationSyntheticAudit' -count=1
+
+      - name: Exercise Domain Relay fencing against MySQL
+        env:
+          AUCTION_DOMAIN_RELAY_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+        run: go test ./app/auction/service/internal/worker/domainrelay -run '^TestIntegrationSQLStore' -count=1
+
+      - name: Exercise Enrichment idempotency and optional-source isolation against MySQL
+        env:
+          AUCTION_ENRICHMENT_TEST_MYSQL_DSN: root:auction_root@tcp(127.0.0.1:3306)/live_auction?parseTime=true&charset=utf8mb4
+        run: go test ./app/auction/service/internal/worker/enrichment -run '^TestIntegrationSQLStore' -count=1
+
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.2.4-alpine@sha256:c8bb255c3559b3e458766db810aa7b3c7af1235b204cfdb304e79ff388fe1a5a
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      AUCTION_TEST_REDIS_ADDR: 127.0.0.1:6379
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js for load-test contracts
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Lint protobuf contracts
+        shell: bash
+        run: |
+          go run github.com/bufbuild/buf/cmd/buf@${BUF_VERSION} lint
+          go run github.com/bufbuild/buf/cmd/buf@${BUF_VERSION} build
+
+      - name: Check protobuf breaking changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          if git cat-file -e "${BASE_SHA}:buf.yaml" 2>/dev/null; then
+            go run github.com/bufbuild/buf/cmd/buf@${BUF_VERSION} breaking --against ".git#ref=${BASE_SHA}"
+          else
+            echo "Bootstrapping Buf governance; no buf.yaml exists in the base revision."
+          fi
+
+      - name: Check protobuf generated code
+        shell: bash
+        run: |
+          go run github.com/bufbuild/buf/cmd/buf@${BUF_VERSION} generate
+          git diff --exit-code -- api
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'The following Go files need gofmt:\n%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Check module files
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run contract tests
+        run: go test ./test/e2e -run 'Contract|Proto' -count=1
+
+      - name: Test load-test contracts
+        run: node --test scripts/load-bid-hot-path.test.mjs scripts/load-bid-fleet.test.mjs scripts/load-search-retrieval.test.mjs scripts/assert-projector-recovery.test.mjs scripts/assert-relay-recovery.test.mjs
+
+      - name: Test infrastructure scripts
+        run: |
+          bash test/infra/kafka-init-topics.test.sh
+          bash test/infra/kafka-acls.test.sh
+          bash test/infra/mysql-connection-budget.test.sh
+          bash test/infra/mysql-backup-restore.test.sh
+          bash test/infra/deploy-secret-boundary.test.sh
+          bash test/infra/prod-release-images.test.sh
+          bash test/infra/fault-injection.test.sh
+          bash test/infra/l2-ha-fault-drill.test.sh
+          bash scripts/check-image-lock.sh
+          bash scripts/check-kubernetes-manifests.sh
+          bash scripts/check-l2-monitoring.sh
+          bash scripts/check-l3-runtime-wiring.sh
+          bash scripts/check-zero-residue.sh
+
+      - name: Enforce core race coverage
+        run: bash scripts/check-core-coverage.sh
+
+      - name: Run integration-tag tests
+        run: go test -tags=integration ./...
+
+      - name: Summarize coverage
+        shell: bash
+        run: go tool cover -func=coverage.out | tee coverage-summary.txt
+
+      - name: Build all packages
+        run: go build ./...
+
+      - name: Check required documentation
+        run: test -f 'docs/openclaw/v1/01-需求草案.md'
+
+      - name: Archive coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-coverage-${{ github.run_id }}
+          path: |
+            coverage-raw.out
+            coverage.out
+            coverage-summary.txt
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,5 +1,10 @@
-export type Money = { amount: number | string; currency: string };
-export type ReplyResult = { code: number; message: string; traceId?: string; trace_id?: string };
+import type { components } from './generated/auction.schema';
+
+type ApiSchema<Name extends keyof components['schemas']> = components['schemas'][Name];
+type Normalized<Name extends keyof components['schemas'], Fields extends object> = Omit<ApiSchema<Name>, keyof Fields> & Fields;
+
+export type Money = ApiSchema<'Money'>;
+export type ReplyResult = ApiSchema<'ReplyResult'>;
 
 export const RESULT_CODE_OK = 0;
 export const RESULT_CODE_INVALID_ARGUMENT = 400001;
@@ -25,8 +30,8 @@ export const RESULT_CODE_LOT_CANCELLED = 409107;
 export const RESULT_CODE_PROJECTION_PENDING = 409108;
 export const RESULT_CODE_INTERNAL_ERROR = 500000;
 
-export type LotStatus = 'LOT_STATUS_UNSPECIFIED' | 'LOT_STATUS_DRAFT' | 'LOT_STATUS_READY' | 'LOT_STATUS_QUEUED' | 'LOT_STATUS_LIVE' | 'LOT_STATUS_EXTENDED' | 'LOT_STATUS_SETTLED' | 'LOT_STATUS_CANCELLED' | 'LOT_STATUS_FAILED';
-export type LotQueueStatus = 'LOT_QUEUE_STATUS_UNSPECIFIED' | 'LOT_QUEUE_STATUS_NONE' | 'LOT_QUEUE_STATUS_QUEUED' | 'LOT_QUEUE_STATUS_NEXT';
+export type LotStatus = ApiSchema<'LotStatus'>;
+export type LotQueueStatus = ApiSchema<'LotQueueStatus'>;
 export type TrustCardType = 'TRUST_CARD_TYPE_UNSPECIFIED' | 'TRUST_CARD_TYPE_CERTIFICATE' | 'TRUST_CARD_TYPE_FLAW' | 'TRUST_CARD_TYPE_DETAIL' | 'TRUST_CARD_TYPE_SERVICE' | 'TRUST_CARD_TYPE_PRICE_REF';
 export type PlaybookStage = 'PLAYBOOK_STAGE_UNSPECIFIED' | 'PLAYBOOK_STAGE_WARM_UP' | 'PLAYBOOK_STAGE_TRUST_BLOCKED' | 'PLAYBOOK_STAGE_BIDDING_ACTIVE' | 'PLAYBOOK_STAGE_DUEL_READY' | 'PLAYBOOK_STAGE_DUEL_MODE' | 'PLAYBOOK_STAGE_SETTLE_READY';
 export type EventType = 'AUCTION_EVENT_TYPE_UNSPECIFIED' | 'AUCTION_EVENT_TYPE_ROOM_SNAPSHOT' | 'AUCTION_EVENT_TYPE_LOT_CREATED' | 'AUCTION_EVENT_TYPE_LOT_STARTED' | 'AUCTION_EVENT_TYPE_LOT_UPDATED' | 'AUCTION_EVENT_TYPE_BID_ACCEPTED' | 'AUCTION_EVENT_TYPE_BID_REJECTED' | 'AUCTION_EVENT_TYPE_RANKING_UPDATED' | 'AUCTION_EVENT_TYPE_TRUST_REVEALED' | 'AUCTION_EVENT_TYPE_DUEL_STARTED' | 'AUCTION_EVENT_TYPE_DUEL_ENDED' | 'AUCTION_EVENT_TYPE_LOT_SETTLED' | 'AUCTION_EVENT_TYPE_LOT_CANCELLED' | 'AUCTION_EVENT_TYPE_LOT_QUEUED' | 'AUCTION_EVENT_TYPE_BID_OUTBID' | 'AUCTION_EVENT_TYPE_AUCTION_EXTENDED' | 'AUCTION_EVENT_TYPE_AUCTION_CLOSED' | 'AUCTION_EVENT_TYPE_ORDER_CREATED' | 'AUCTION_EVENT_TYPE_PAYMENT_SUCCESS';
@@ -67,12 +72,8 @@ export const USER_STATUS = {
   DISABLED: 'USER_STATUS_DISABLED',
 } as const;
 
-export type UserStatus = (typeof USER_STATUS)[keyof typeof USER_STATUS];
+export type UserStatus = ApiSchema<'UserStatus'>;
 export const BACKOFFICE_ACCESS_PERMISSIONS: PermissionCode[] = [PERMISSION_CODE.LOT_VIEW_ADMIN, PERMISSION_CODE.AUCTION_CONTROL, PERMISSION_CODE.REALTIME_VIEW, PERMISSION_CODE.ORDER_MANAGE];
-
-export function hasRoleCode(user: Pick<User, 'roleCodes'> | undefined | null, roleCode: RoleCode | string) {
-  return Boolean(user?.roleCodes?.some((item) => item === roleCode));
-}
 
 export function hasPermission(user: Pick<User, 'permissionCodes'> | undefined | null, permissionCode: PermissionCode | string) {
   return Boolean(user?.permissionCodes?.some((item) => item === permissionCode));
@@ -82,15 +83,7 @@ export function canAccessBackoffice(user?: Pick<User, 'permissionCodes' | 'statu
   return Boolean(user && user.status === USER_STATUS.ACTIVE && BACKOFFICE_ACCESS_PERMISSIONS.some((permission) => hasPermission(user, permission)));
 }
 
-export function isMerchantOwner(user?: Pick<User, 'roleCodes'> | null) {
-  return hasRoleCode(user, ROLE_CODE.MERCHANT_OWNER);
-}
-
-export function isManagedTeamRole(roleCode?: RoleCode | string | null) {
-  return roleCode === ROLE_CODE.ANCHOR || roleCode === ROLE_CODE.OPERATOR;
-}
-
-export type User = {
+export type User = Normalized<'User', {
   id: string;
   username: string;
   nickname: string;
@@ -101,10 +94,10 @@ export type User = {
   status: UserStatus;
   createdAtUnixMs: number | string;
   updatedAtUnixMs: number | string;
-};
-export type AuthTokens = { accessToken: string; refreshToken: string; accessExpiresAtUnixMs: number | string; refreshExpiresAtUnixMs: number | string };
+}>;
+export type AuthTokens = Normalized<'AuthTokens', { accessToken: string; refreshToken: string; accessExpiresAtUnixMs: number | string; refreshExpiresAtUnixMs: number | string }>;
 
-export type BidRule = {
+export type BidRule = Normalized<'BidRule', {
   startPrice: Money;
   minIncrement: Money;
   capPrice?: Money;
@@ -112,37 +105,34 @@ export type BidRule = {
   antiSnipeWindowSeconds: number;
   antiSnipeExtendSeconds: number;
   maxExtendCount: number;
-};
-export type TrustRevealCard = { id: string; lotId: string; type: TrustCardType; title: string; content: string; imageUrl?: string; revealed: boolean; revealedAtUnixMs: number | string };
-export type Bid = { id: string; lotId: string; userId: string; nickname: string; amount: Money; createdAtUnixMs: number | string };
-export type RankingItem = { rank: number; userId: string; nickname: string; amount: Money; bidAtUnixMs: number | string };
-export type DuelState = { active: boolean; lotId: string; userAId: string; userANickname: string; userBId: string; userBNickname: string; startedAtUnixMs: number | string; endsAtUnixMs: number | string; extendCount: number; maxExtendCount: number };
-export type LotStats = { participantCount: number; bidCount: number };
-export type Lot = { id: string; roomId: string; title: string; description: string; imageUrl: string; status: LotStatus; queueStatus?: LotQueueStatus; queuePosition?: number; rule: BidRule; currentPrice: Money; leadingUserId: string; leadingNickname: string; startedAtUnixMs: number | string; endsAtUnixMs: number | string; settledAtUnixMs: number | string; cancelledAtUnixMs?: number | string; winnerUserId: string; winnerNickname: string; finalPrice: Money; version: number | string; trustCards: TrustRevealCard[]; duelState: DuelState; playbookStage: PlaybookStage; stats: LotStats; cancelReason?: string; galleryImageUrls?: string[]; category?: string; tags?: string[]; estimatePrice?: Money; stock?: number | string; afterSaleNotes?: string; depositAmount?: Money };
-export type RoomSnapshot = { roomId: string; currentLot?: Lot; ranking: RankingItem[]; recentBids: Bid[]; playbookStage: PlaybookStage; serverTimeUnixMs: number | string };
-export type RoomPresence = { roomId: string; totalConnections: number | string; viewerConnections: number | string; operatorConnections: number | string; serverTimeUnixMs: number | string };
-export type Room = { id: string; mainAccountId: string; name: string; platform: string; platformRoomId?: string; status: 'ACTIVE' | 'DISABLED' | string; createdByUserId?: string; createdAtUnixMs: number | string; updatedAtUnixMs: number | string };
-export type AuctionEvent = { id: string; type: EventType; roomId: string; lotId: string; occurredAtUnixMs: number | string; lot?: Lot; bid?: Bid; ranking?: RankingItem[]; trustCard?: TrustRevealCard; duelState?: DuelState; snapshot?: RoomSnapshot; reason?: string; orderId?: string; paymentId?: string };
-export type CreateLotRequest = { roomId: string; title: string; description: string; imageUrl: string; rule: BidRule; trustCards: Omit<TrustRevealCard, 'lotId' | 'revealed' | 'revealedAtUnixMs'>[]; galleryImageUrls?: string[]; category?: string; tags?: string[]; estimatePrice?: Money; stock?: number; afterSaleNotes?: string; depositAmount?: Money };
-export type PatchLotDraftRequest = Partial<CreateLotRequest> & { lotId: string };
-export type PlaceBidRequest = { lotId?: string; amount: Money; clientKnownVersion?: number | string; idempotencyKey?: string };
-export type CancelLotRequest = { lotId?: string; reason: string };
-
-export type CreateLotReply = { lot?: Lot; result?: ReplyResult };
-export type PatchLotDraftReply = { lot?: Lot; result?: ReplyResult };
-export type QueueLotReply = { lot?: Lot; queuePosition?: number; event?: AuctionEvent; result?: ReplyResult };
-export type GetLotReply = { lot?: Lot; result?: ReplyResult };
-export type ListLotsReply = { lots?: Lot[]; nextPageToken?: string; result?: ReplyResult };
-export type StartLotReply = { lot?: Lot; event?: AuctionEvent; result?: ReplyResult };
-export type PlaceBidReply = { accepted: boolean; lot?: Lot; bid?: Bid; ranking?: RankingItem[]; event?: AuctionEvent; rejectReason?: string; result?: ReplyResult };
-export type RevealTrustCardReply = { lot?: Lot; trustCard?: TrustRevealCard; event?: AuctionEvent; result?: ReplyResult };
-export type StartDuelReply = { lot?: Lot; duelState?: DuelState; event?: AuctionEvent; result?: ReplyResult };
-export type SettleLotReply = { lot?: Lot; event?: AuctionEvent; result?: ReplyResult };
-export type CancelLotReply = { lot?: Lot; event?: AuctionEvent; result?: ReplyResult };
-export type GetRoomSnapshotReply = { snapshot?: RoomSnapshot; result?: ReplyResult };
-export type GetRoomPresenceReply = { presence?: RoomPresence; result?: ReplyResult };
-export type ListRoomEventsReply = { events?: AuctionEvent[]; nextPageToken?: string; result?: ReplyResult };
-export type ListRoomsReply = { rooms?: Room[]; result?: ReplyResult };
+}>;
+export type TrustRevealCard = Normalized<'TrustRevealCard', { id: string; lotId: string; type: TrustCardType; title: string; content: string; imageUrl?: string; revealed: boolean; revealedAtUnixMs: number | string }>;
+export type Bid = Normalized<'Bid', { id: string; lotId: string; userId: string; nickname: string; amount: Money; createdAtUnixMs: number | string }>;
+export type RankingItem = Normalized<'RankingItem', { rank: number; userId: string; nickname: string; amount: Money; bidAtUnixMs: number | string }>;
+export type DuelState = Normalized<'DuelState', { active: boolean; lotId: string; userAId: string; userANickname: string; userBId: string; userBNickname: string; startedAtUnixMs: number | string; endsAtUnixMs: number | string; extendCount: number; maxExtendCount: number }>;
+type LotStats = Normalized<'LotStats', { participantCount: number; bidCount: number }>;
+export type Lot = Normalized<'Lot', { id: string; roomId: string; title: string; description: string; imageUrl: string; status: LotStatus; queueStatus?: LotQueueStatus; queuePosition?: number; rule: BidRule; currentPrice: Money; leadingUserId: string; leadingNickname: string; startedAtUnixMs: number | string; endsAtUnixMs: number | string; settledAtUnixMs: number | string; cancelledAtUnixMs?: number | string; winnerUserId: string; winnerNickname: string; finalPrice: Money; version: number | string; trustCards: TrustRevealCard[]; duelState: DuelState; playbookStage: PlaybookStage; stats: LotStats; cancelReason?: string; galleryImageUrls?: string[]; category?: string; tags?: string[]; estimatePrice?: Money; stock?: number | string; afterSaleNotes?: string; depositAmount?: Money }>;
+export type RoomSnapshot = Normalized<'RoomSnapshot', { roomId: string; currentLot?: Lot; ranking: RankingItem[]; recentBids: Bid[]; playbookStage: PlaybookStage; serverTimeUnixMs: number | string }>;
+export type RoomPresence = Normalized<'RoomPresence', { roomId: string; totalConnections: number | string; viewerConnections: number | string; operatorConnections: number | string; serverTimeUnixMs: number | string }>;
+export type Room = Normalized<'AuctionRoom', { id: string; mainAccountId: string; name: string; platform: string; platformRoomId?: string; status: 'ACTIVE' | 'DISABLED' | string; createdByUserId?: string; createdAtUnixMs: number | string; updatedAtUnixMs: number | string }>;
+export type AuctionEvent = Normalized<'AuctionEvent', { id: string; type: EventType; roomId: string; lotId: string; occurredAtUnixMs: number | string; lot?: Lot; bid?: Bid; ranking?: RankingItem[]; trustCard?: TrustRevealCard; duelState?: DuelState; snapshot?: RoomSnapshot; reason?: string; orderId?: string; paymentId?: string }>;
+export type CreateLotRequest = Normalized<'CreateLotRequest', { roomId: string; title: string; description: string; imageUrl: string; rule: BidRule; trustCards: Omit<TrustRevealCard, 'lotId' | 'revealed' | 'revealedAtUnixMs'>[]; galleryImageUrls?: string[]; category?: string; tags?: string[]; estimatePrice?: Money; stock?: number; afterSaleNotes?: string; depositAmount?: Money }>;
+export type PatchLotDraftRequest = Normalized<'PatchLotDraftRequest', Partial<CreateLotRequest> & { lotId: string }>;
+type LotReplyFields = { lot?: Lot; event?: AuctionEvent; queuePosition?: number; trustCard?: TrustRevealCard; duelState?: DuelState; result?: ReplyResult };
+export type CreateLotReply = Normalized<'LotReply', LotReplyFields>;
+export type PatchLotDraftReply = Normalized<'LotReply', LotReplyFields>;
+export type QueueLotReply = Normalized<'LotReply', LotReplyFields>;
+export type StartLotReply = Normalized<'LotReply', LotReplyFields>;
+export type RevealTrustCardReply = Normalized<'LotReply', LotReplyFields>;
+export type StartDuelReply = Normalized<'LotReply', LotReplyFields>;
+export type SettleLotReply = Normalized<'LotReply', LotReplyFields>;
+export type CancelLotReply = Normalized<'LotReply', LotReplyFields>;
+export type GetRoomSnapshotReply = Normalized<'GetRoomSnapshotReply', { snapshot?: RoomSnapshot; result?: ReplyResult }>;
+export type ListRoomsReply = Normalized<'ListRoomsReply', { rooms?: Room[]; result?: ReplyResult }>;
+export type AdminUserReply = Normalized<'UserReply', { user?: unknown; result?: ReplyResult }>;
+export type AdminUsersReply = Normalized<'ListUsersReply', { users?: unknown[]; total?: number | string; page?: number; pageSize?: number; result?: ReplyResult }>;
+export type AdminLotsReply = Normalized<'ListAdminLotPageReply', { lots?: unknown[]; total?: number | string; page?: number; pageSize?: number; result?: ReplyResult }>;
+export type AdminOrdersReply = Normalized<'ListAuctionOrdersReply', { orders?: unknown[]; total?: number | string; page?: number; pageSize?: number; result?: ReplyResult }>;
 
 export type UploadedAsset = { id: string; imageUrl: string; bucket: string; objectKey: string; mimeType: string; sizeBytes: number | string; status?: string; expiresAtUnixMs?: number | string };
 export type UploadImageReply = {
@@ -154,9 +144,10 @@ export type UploadImageReply = {
   result?: ReplyResult;
 };
 
-export type LoginReply = { user?: User; tokens?: AuthTokens; result?: ReplyResult };
-export type RegisterMerchantReply = { user?: User; tokens?: AuthTokens; result?: ReplyResult };
-export type ResetPasswordReply = { user?: User; result?: ReplyResult };
-export type RefreshTokenReply = { tokens?: AuthTokens; result?: ReplyResult };
-export type LogoutReply = { result?: ReplyResult };
-export type GetMeReply = { user?: User; result?: ReplyResult };
+type AuthReplyFields = { user?: User; tokens?: AuthTokens; result?: ReplyResult };
+export type LoginReply = Normalized<'AuthReply', AuthReplyFields>;
+export type RegisterMerchantReply = Normalized<'AuthReply', AuthReplyFields>;
+export type ResetPasswordReply = Normalized<'UserReply', { user?: User; result?: ReplyResult }>;
+export type RefreshTokenReply = Normalized<'AuthReply', AuthReplyFields>;
+export type LogoutReply = Normalized<'EmptyReply', { result?: ReplyResult }>;
+export type GetMeReply = Normalized<'UserReply', { user?: User; result?: ReplyResult }>;

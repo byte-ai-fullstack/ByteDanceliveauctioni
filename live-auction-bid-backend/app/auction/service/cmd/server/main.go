@@ -6,22 +6,31 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	v1 "live-auction-bid/backend/api/auction/service/v1"
 	"live-auction-bid/backend/app/auction/service/internal/aiassistant"
 	"live-auction-bid/backend/app/auction/service/internal/biz/auction"
 	shopbiz "live-auction-bid/backend/app/auction/service/internal/biz/shop"
 	userbiz "live-auction-bid/backend/app/auction/service/internal/biz/user"
-	"live-auction-bid/backend/app/auction/service/internal/cluster"
 	"live-auction-bid/backend/app/auction/service/internal/data"
+	"live-auction-bid/backend/app/auction/service/internal/gateway"
+	"live-auction-bid/backend/app/auction/service/internal/mysqlschema"
+	"live-auction-bid/backend/app/auction/service/internal/observability"
 	"live-auction-bid/backend/app/auction/service/internal/pkg/auth"
 	"live-auction-bid/backend/app/auction/service/internal/realtime"
+	"live-auction-bid/backend/app/auction/service/internal/redisclient"
 	"live-auction-bid/backend/app/auction/service/internal/searchindex"
 	"live-auction-bid/backend/app/auction/service/internal/server"
 	appsvc "live-auction-bid/backend/app/auction/service/internal/service"
 	"live-auction-bid/backend/app/auction/service/internal/storage"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -32,42 +41,63 @@ func main() {
 	mysqlDSN := getenv("AUCTION_MYSQL_DSN", "auction:auction_dev@tcp(127.0.0.1:13306)/live_auction?parseTime=true&charset=utf8mb4&loc=Local")
 	redisAddr := getenv("AUCTION_REDIS_ADDR", "127.0.0.1:16379")
 	redisPassword := getenv("AUCTION_REDIS_PASSWORD", "auction_redis")
+	instanceID := getenv("AUCTION_INSTANCE_ID", defaultInstanceID())
+	redisConfig, err := redisclient.FromEnv(os.Getenv, redisAddr, "gateway-"+instanceID)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if redisConfig.Password == "" {
+		redisConfig.Password = redisPassword
+	}
+	redisPrimary, err := redisclient.NewPrimaryClient(context.Background(), redisConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	schemaVerifier, err := mysqlschema.NewVerifier()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	store, err := data.NewStore(context.Background(), data.Config{
-		MySQLDSN:                mysqlDSN,
-		RedisAddr:               redisAddr,
-		RedisPassword:           redisPassword,
-		RuntimeProjectionShards: getenvInt("AUCTION_RUNTIME_PROJECTION_SHARDS", 16),
-		RuntimeProjectionBackpressurePendingLimit: int64(getenvInt("AUCTION_RUNTIME_PROJECTION_BACKPRESSURE_PENDING_LIMIT", 0)),
-		RuntimeProjectionBackpressureLag:          getenvDuration("AUCTION_RUNTIME_PROJECTION_BACKPRESSURE_LAG", 0),
-		DBMaxOpenConns:                            getenvInt("AUCTION_DB_MAX_OPEN_CONNS", 20),
-		DBMaxIdleConns:                            getenvInt("AUCTION_DB_MAX_IDLE_CONNS", 10),
-		DBConnMaxLifetime:                         getenvDuration("AUCTION_DB_CONN_MAX_LIFETIME", 30*time.Minute),
-		DBConnMaxIdleTime:                         getenvDuration("AUCTION_DB_CONN_MAX_IDLE_TIME", 2*time.Minute),
-		RedisPoolSize:                             getenvInt("AUCTION_REDIS_POOL_SIZE", 0),
-		RedisMinIdleConns:                         getenvInt("AUCTION_REDIS_MIN_IDLE_CONNS", 0),
+		MySQLDSN:           mysqlDSN,
+		RedisAddr:          redisAddr,
+		RedisPassword:      redisPassword,
+		RedisClient:        redisPrimary,
+		SchemaVerifier:     schemaVerifier,
+		OutboxShards:       getenvInt("AUCTION_OUTBOX_SHARDS", data.RuntimeOutboxShardCount),
+		OutboxPendingLimit: int64(getenvInt("AUCTION_OUTBOX_PENDING_LIMIT", 0)),
+		DBMaxOpenConns:     getenvInt("AUCTION_DB_MAX_OPEN_CONNS", 20),
+		DBMaxIdleConns:     getenvInt("AUCTION_DB_MAX_IDLE_CONNS", 10),
+		DBConnMaxLifetime:  getenvDuration("AUCTION_DB_CONN_MAX_LIFETIME", 30*time.Minute),
+		DBConnMaxIdleTime:  getenvDuration("AUCTION_DB_CONN_MAX_IDLE_TIME", 2*time.Minute),
+		RedisPoolSize:      getenvInt("AUCTION_REDIS_POOL_SIZE", 0),
+		RedisMinIdleConns:  getenvInt("AUCTION_REDIS_MIN_IDLE_CONNS", 0),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			log.Printf("close auction store: %v", closeErr)
+		}
+	}()
+	if err := store.BootstrapReferenceData(context.Background()); err != nil {
+		log.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	buyerSearch, buyerEmbedder, buyerSearchWorker := newBuyerSearchFromEnv(ctx, store)
-	if buyerSearch != nil {
-		defer buyerSearch.Close()
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	searchRequirements := searchMonitoringRequirementsFromEnv(os.Getenv)
+	observability.SetSearchMonitoringRequirements(searchRequirements.elasticsearch, searchRequirements.pgvector)
+	buyerKeywords, buyerVectors, buyerEmbedder := newBuyerSearchFromEnv(ctx)
+	if buyerVectors != nil {
+		defer func() {
+			if closeErr := buyerVectors.Close(); closeErr != nil {
+				log.Printf("close buyer pgvector index: %v", closeErr)
+			}
+		}()
 	}
-	if buyerSearchWorker != nil {
-		buyerSearchWorker.Start(ctx)
-	}
-	instanceID := getenv("AUCTION_INSTANCE_ID", defaultInstanceID())
-	leaseProvider := data.NewRedisLeaseProvider(store)
-	leaseTTL := getenvDuration("AUCTION_WORKER_LEASE_TTL", 15*time.Second)
-	leaseRenewInterval := getenvDuration("AUCTION_WORKER_LEASE_RENEW_INTERVAL", 5*time.Second)
-	outboxWorker := data.NewEventOutboxWorker(store, 10*time.Second, 100)
-	outboxWorker.BindLease(leaseProvider, "auction:lease:event-outbox-worker", instanceID, leaseTTL, leaseRenewInterval)
-	outboxWorker.Start(ctx)
-
 	authManager, err := auth.NewManager(auth.Config{
 		Secret:     os.Getenv("AUCTION_JWT_SECRET"),
 		Issuer:     getenv("AUCTION_JWT_ISSUER", "auction-backend"),
@@ -93,210 +123,302 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	drainConfig, err := realtime.DrainConfigFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	snapshotRefreshConfig, err := realtime.SnapshotRefreshConfigFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
 	hub := realtime.NewHub(nil, realtimeConfig)
 	hub.BindAuthManager(authManager)
-	eventPublisher, closeRealtimeBus := newRealtimePublisherFromEnv(ctx, hub, instanceID, redisAddr, redisPassword)
+	eventPublisher, closeRealtimeBus, err := newRealtimePublisherFromEnv(ctx, hub, instanceID)
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer closeRealtimeBus()
 	paymentProvider, err := auction.NewPaymentProviderFromName(os.Getenv("AUCTION_PAYMENT_PROVIDER"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	auctionUsecase := auction.NewAuctionUsecase(store, store, store, eventPublisher).
-		SetPaymentProvider(paymentProvider).
-		SetSyncRuntimeProjection(getenvBool("AUCTION_BID_SYNC_PROJECTION", false)).
-		SetBidDBGuardMode(getenv("AUCTION_BID_DB_GUARD_MODE", "runtime-first"))
-	runtimeProjectionWorker := data.NewRuntimeProjectionWorker(
-		store,
-		eventPublisher,
-		getenvDuration("AUCTION_RUNTIME_PROJECTION_INTERVAL", 2*time.Second),
-		getenvInt("AUCTION_RUNTIME_PROJECTION_BATCH_LIMIT", 100),
-	)
-	runtimeProjectionWorker.BindLease(leaseProvider, instanceID, leaseTTL, leaseRenewInterval)
-	runtimeProjectionWorker.Start(ctx)
+		SetPaymentProvider(paymentProvider)
 	hub.BindRoomAccessValidator(auctionUsecase)
-	auctionCloseWorker := auction.NewAuctionCloseWorker(auctionUsecase, getenvDuration("AUCTION_CLOSE_WORKER_INTERVAL", 2*time.Second), 100)
-	auctionCloseWorker.BindLease(leaseProvider, "auction:lease:auction-close-worker", instanceID, leaseTTL, leaseRenewInterval)
-	auctionCloseWorker.Start(ctx)
-	clusterStatus := newClusterStatusFromEnv()
 	hub.BindSnapshotProvider(auctionUsecase)
+	snapshotRefreshDone := make(chan error, 1)
+	go func() {
+		snapshotRefreshDone <- hub.RunSnapshotRefresh(ctx, snapshotRefreshConfig)
+	}()
+	defer func() {
+		cancel()
+		if err := <-snapshotRefreshDone; err != nil {
+			log.Printf("realtime snapshot refresher stopped with error: %v", err)
+		}
+	}()
+	aiAssistant := aiassistant.NewFromEnv(os.Getenv)
+	observability.SetAIAssistantMode(aiAssistant.Mode())
 	auctionService := appsvc.NewAuctionService(auctionUsecase, hub).
-		SetAIAssistant(aiassistant.NewFromEnv(os.Getenv)).
-		SetBuyerSearch(buyerSearch, buyerEmbedder).
+		SetAIAssistant(aiAssistant).
+		SetBuyerSearch(buyerKeywords, buyerVectors, buyerEmbedder).
+		SetBuyerSearchTimeout(getenvDuration("AUCTION_SEARCH_QUERY_TIMEOUT", 5*time.Second)).
 		SetVerboseBidLog(getenvBool("AUCTION_VERBOSE_BID_LOG", false))
+	auctionHTTPService, commandHealth, closeCommandClient, err := newAuctionHTTPServiceFromEnv(auctionService)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer closeCommandClient()
 	userService := appsvc.NewUserService(userUsecase)
 	shopUsecase := shopbiz.NewUsecase(store)
 	shopService := appsvc.NewShopService(shopUsecase)
 	orderService := appsvc.NewOrderService(shopUsecase, auctionUsecase)
-	consulRegistration, err := server.RegisterConsulService(context.Background(), server.ConsulConfig{
-		Addr:           getenv("AUCTION_CONSUL_ADDR", "127.0.0.1:18500"),
-		ServiceName:    getenv("AUCTION_SERVICE_NAME", "auction-backend"),
-		ServiceAddress: getenv("AUCTION_SERVICE_ADDR", "127.0.0.1"),
-		HTTPAddr:       addr,
+	readiness := server.Readiness{
+		Store:          store,
+		CommandService: commandHealth,
+		Gateway:        hub,
+	}
+	httpServer := server.NewHTTPServer(addr, auctionHTTPService, auctionService, userService, shopService, orderService, hub, readiness, authManager, authManager.Middleware(), imageStorage, store)
+
+	log.Printf("auction gateway listening on HTTP/WebSocket %s", addr)
+	if err := runGatewayHTTPServer(
+		ctx,
+		signalCtx.Done(),
+		httpServer,
+		hub,
+		drainConfig,
+		getenvDuration("AUCTION_WS_DRAIN_TIMEOUT", 75*time.Second),
+		getenvDuration("AUCTION_HTTP_STOP_TIMEOUT", 10*time.Second),
+	); err != nil {
+		log.Printf("auction backend stopped with error: %v", err)
+	}
+}
+
+func newAuctionHTTPServiceFromEnv(local v1.AuctionServiceHTTPServer) (v1.AuctionServiceHTTPServer, server.HealthChecker, func(), error) {
+	target := strings.TrimSpace(os.Getenv("AUCTION_COMMAND_GRPC_TARGET"))
+	if target == "" {
+		return nil, nil, nil, errors.New("AUCTION_COMMAND_GRPC_TARGET is required; gateway cannot execute auction commands locally")
+	}
+	conn, err := grpc.NewClient(
+		target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create auction command client: %w", err)
+	}
+	health, err := gateway.NewCommandHealthChecker(conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, nil, err
+	}
+	proxy, err := gateway.NewAuctionProxy(
+		local,
+		v1.NewAuctionCommandServiceClient(conn),
+		getenvDuration("AUCTION_COMMAND_GRPC_TIMEOUT", 3*time.Second),
+	)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, nil, err
+	}
+	log.Printf("auction runtime commands routed through private gRPC")
+	return proxy, health, func() { _ = conn.Close() }, nil
+}
+
+type lifecycleServer interface {
+	Start(context.Context) error
+	Stop(context.Context) error
+}
+
+func runGatewayHTTPServer(
+	ctx context.Context,
+	shutdown <-chan struct{},
+	httpServer lifecycleServer,
+	hub *realtime.Hub,
+	drainConfig realtime.DrainConfig,
+	drainTimeout time.Duration,
+	stopTimeout time.Duration,
+) error {
+	if httpServer == nil {
+		return errors.New("auction HTTP server is required")
+	}
+	if hub == nil {
+		return errors.New("realtime hub is required")
+	}
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- httpServer.Start(ctx) }()
+
+	select {
+	case err := <-serverErr:
+		if err == nil && ctx.Err() == nil {
+			err = errors.New("auction gateway HTTP server stopped unexpectedly")
+		}
+		return err
+	case <-shutdown:
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), drainTimeout)
+	drainErr := hub.Drain(drainCtx, drainConfig)
+	cancelDrain()
+
+	stopCtx, cancelStop := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
+	stopErr := httpServer.Stop(stopCtx)
+	cancelStop()
+
+	waitTimeout := stopTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = time.Second
+	}
+	waitCtx, cancelWait := context.WithTimeout(context.WithoutCancel(ctx), waitTimeout)
+	defer cancelWait()
+	var startErr error
+	select {
+	case startErr = <-serverErr:
+	case <-waitCtx.Done():
+		startErr = errors.New("auction gateway HTTP server did not stop after shutdown")
+	}
+	return errors.Join(drainErr, stopErr, startErr)
+}
+
+func newRealtimePublisherFromEnv(ctx context.Context, hub *realtime.Hub, instanceID string) (*realtime.Publisher, func(), error) {
+	if hub == nil {
+		return nil, nil, errors.New("realtime hub is required")
+	}
+	natsURLs := strings.TrimSpace(os.Getenv("AUCTION_NATS_URLS"))
+	if natsURLs == "" {
+		if productionEnvironment(os.Getenv("AUCTION_ENV")) {
+			return nil, nil, errors.New("AUCTION_NATS_URLS is required in production")
+		}
+		log.Printf("NATS realtime fanout disabled for single-process development")
+		return realtime.NewPublisher(hub), func() {}, nil
+	}
+	bus, err := realtime.NewNATSBus(realtime.NATSBusConfig{
+		URL:             natsURLs,
+		Name:            getenv("AUCTION_NATS_CLIENT_NAME", "live-auction-"+instanceID),
+		Origin:          instanceID,
+		ReconnectWait:   getenvDuration("AUCTION_NATS_RECONNECT_WAIT", 500*time.Millisecond),
+		ReconnectJitter: getenvDuration("AUCTION_NATS_RECONNECT_JITTER", 500*time.Millisecond),
+		FlushTimeout:    getenvDuration("AUCTION_NATS_FLUSH_TIMEOUT", 250*time.Millisecond),
+		DispatchTimeout: getenvDuration("AUCTION_NATS_DISPATCH_TIMEOUT", 2*time.Second),
 	})
 	if err != nil {
-		log.Fatal(err)
+		return nil, nil, fmt.Errorf("create NATS realtime bus: %w", err)
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := consulRegistration.Deregister(ctx); err != nil {
-			log.Printf("consul deregister failed: %v", err)
-		}
-	}()
-
-	readiness := server.Readiness{
-		Store:             store,
-		Outbox:            outboxWorker,
-		AuctionClose:      auctionCloseWorker,
-		RuntimeProjection: runtimeProjectionWorker,
-		ProjectionMetrics: runtimeProjectionWorker,
-		WorkerStatuses:    []auction.WorkerStatusProvider{outboxWorker, auctionCloseWorker, runtimeProjectionWorker},
-		Cluster:           clusterStatus,
-		Consul:            consulRegistration,
+	if err := bus.Start(ctx, hub); err != nil {
+		_ = bus.Close()
+		return nil, nil, fmt.Errorf("start NATS realtime bus: %w", err)
 	}
-	httpServer := server.NewHTTPServer(addr, auctionService, userService, shopService, orderService, hub, readiness, authManager, authManager.Middleware(), imageStorage, store)
-
-	log.Printf("auction backend listening on %s via kratos http", addr)
-	if err := httpServer.Start(ctx); err != nil {
-		log.Fatal(err)
-	}
+	hub.BindRoomSubscriptionManager(bus)
+	log.Printf("NATS realtime fanout enabled: subject_mode=room_presence origin=%s", instanceID)
+	return realtime.NewPublisher(hub, bus), func() {
+		_ = bus.Close()
+	}, nil
 }
 
-func newRealtimePublisherFromEnv(ctx context.Context, hub *realtime.Hub, instanceID, redisAddr, redisPassword string) (*realtime.Publisher, func()) {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv("AUCTION_REALTIME_BUS")))
-	if mode == "" || mode == "local" || mode == "memory" {
-		return realtime.NewPublisher(hub), func() {}
-	}
-	switch mode {
-	case "redis", "pubsub", "redis_pubsub":
-		bus, err := realtime.NewRedisPubSubBus(realtime.RedisBusConfig{
-			Addr:     getenv("AUCTION_REALTIME_BUS_REDIS_ADDR", redisAddr),
-			Password: getenv("AUCTION_REALTIME_BUS_REDIS_PASSWORD", redisPassword),
-			Channel:  getenv("AUCTION_REALTIME_BUS_CHANNEL", "auction:realtime:events"),
-			Origin:   instanceID,
-		})
-		if err != nil {
-			log.Fatalf("create redis realtime bus failed: %v", err)
-		}
-		if err := bus.Start(ctx, hub); err != nil {
-			_ = bus.Close()
-			log.Fatalf("start redis realtime bus failed: %v", err)
-		}
-		log.Printf("redis pubsub realtime bus enabled: channel=%s origin=%s", getenv("AUCTION_REALTIME_BUS_CHANNEL", "auction:realtime:events"), instanceID)
-		return realtime.NewPublisher(hub, bus), func() {
-			_ = bus.Close()
-		}
-	case "stream", "redis_stream":
-		bus, err := realtime.NewRedisStreamBus(realtime.RedisStreamBusConfig{
-			Addr:         getenv("AUCTION_REALTIME_BUS_REDIS_ADDR", redisAddr),
-			Password:     getenv("AUCTION_REALTIME_BUS_REDIS_PASSWORD", redisPassword),
-			Stream:       getenv("AUCTION_REALTIME_BUS_STREAM", "auction:realtime:events:stream"),
-			Group:        getenv("AUCTION_REALTIME_BUS_GROUP", "auction-realtime-"+instanceID),
-			Consumer:     getenv("AUCTION_REALTIME_BUS_CONSUMER", instanceID),
-			Origin:       instanceID,
-			Block:        getenvDuration("AUCTION_REALTIME_BUS_STREAM_BLOCK", 2*time.Second),
-			Count:        int64(getenvInt("AUCTION_REALTIME_BUS_STREAM_COUNT", 100)),
-			MaxLenApprox: int64(getenvInt("AUCTION_REALTIME_BUS_STREAM_MAXLEN", 100000)),
-		})
-		if err != nil {
-			log.Fatalf("create redis stream realtime bus failed: %v", err)
-		}
-		if err := bus.Start(ctx, hub); err != nil {
-			_ = bus.Close()
-			log.Fatalf("start redis stream realtime bus failed: %v", err)
-		}
-		log.Printf("redis stream realtime bus enabled: stream=%s group=%s consumer=%s origin=%s", getenv("AUCTION_REALTIME_BUS_STREAM", "auction:realtime:events:stream"), getenv("AUCTION_REALTIME_BUS_GROUP", "auction-realtime-"+instanceID), getenv("AUCTION_REALTIME_BUS_CONSUMER", instanceID), instanceID)
-		return realtime.NewPublisher(hub, bus), func() {
-			_ = bus.Close()
-		}
-	case "nats":
-		bus, err := realtime.NewNATSBus(realtime.NATSBusConfig{
-			URL:     getenv("AUCTION_REALTIME_BUS_NATS_URL", "nats://127.0.0.1:4222"),
-			Subject: getenv("AUCTION_REALTIME_BUS_NATS_SUBJECT", "auction.realtime.events"),
-			Queue:   getenv("AUCTION_REALTIME_BUS_NATS_QUEUE", ""),
-			Name:    getenv("AUCTION_REALTIME_BUS_NATS_NAME", "live-auction-"+instanceID),
-			Origin:  instanceID,
-		})
-		if err != nil {
-			log.Fatalf("create nats realtime bus failed: %v", err)
-		}
-		if err := bus.Start(ctx, hub); err != nil {
-			_ = bus.Close()
-			log.Fatalf("start nats realtime bus failed: %v", err)
-		}
-		log.Printf("nats realtime bus enabled: url=%s subject=%s queue=%s origin=%s", getenv("AUCTION_REALTIME_BUS_NATS_URL", "nats://127.0.0.1:4222"), getenv("AUCTION_REALTIME_BUS_NATS_SUBJECT", "auction.realtime.events"), getenv("AUCTION_REALTIME_BUS_NATS_QUEUE", ""), instanceID)
-		return realtime.NewPublisher(hub, bus), func() {
-			_ = bus.Close()
-		}
+func productionEnvironment(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "prod", "production":
+		return true
 	default:
-		log.Fatalf("unsupported AUCTION_REALTIME_BUS: %s", mode)
+		return false
 	}
-	return realtime.NewPublisher(hub), func() {}
 }
 
-type runtimeClusterStatus struct {
-	mode     string
-	registry *cluster.StaticRegistry
+type searchMonitoringRequirements struct {
+	elasticsearch bool
+	pgvector      bool
 }
 
-func newClusterStatusFromEnv() runtimeClusterStatus {
-	mode := strings.ToLower(strings.TrimSpace(getenv("AUCTION_CLUSTER_MODE", "single")))
-	if mode == "" || mode == "single" || mode == "standalone" {
-		return runtimeClusterStatus{mode: "single"}
+func searchMonitoringRequirementsFromEnv(getenv func(string) string) searchMonitoringRequirements {
+	if getenv == nil {
+		return searchMonitoringRequirements{}
 	}
-	registry, err := cluster.ParseStaticRegistryJSON(os.Getenv("AUCTION_CLUSTER_REGISTRY_JSON"))
-	if err != nil {
-		log.Fatalf("parse AUCTION_CLUSTER_REGISTRY_JSON failed: %v", err)
+	provider := strings.ToLower(strings.TrimSpace(getenv("AUCTION_SEARCH_PROVIDER")))
+	return searchMonitoringRequirements{
+		elasticsearch: strings.TrimSpace(getenv("AUCTION_SEARCH_ES_URL")) != "",
+		pgvector:      strings.TrimSpace(getenv("AUCTION_SEARCH_PG_DSN")) != "" && (provider == "" || provider == "pgvector"),
 	}
-	snapshot := registry.Snapshot()
-	log.Printf("cluster mode enabled: mode=%s shards=%d assignments=%d", mode, len(snapshot.Shards), len(snapshot.Assignments))
-	return runtimeClusterStatus{mode: mode, registry: registry}
 }
 
-func (s runtimeClusterStatus) ClusterSnapshot(context.Context) map[string]any {
-	if s.registry == nil {
-		return map[string]any{"ok": true, "mode": "single"}
-	}
-	return map[string]any{"ok": true, "mode": s.mode, "registry": s.registry.Snapshot()}
-}
-
-func newBuyerSearchFromEnv(ctx context.Context, source searchindex.DocumentSource) (*searchindex.PGVectorIndex, *searchindex.EmbeddingClient, *searchindex.SyncWorker) {
+func newBuyerSearchFromEnv(ctx context.Context) (*searchindex.ElasticsearchIndex, *searchindex.PGVectorIndex, *searchindex.EmbeddingClient) {
 	provider := strings.ToLower(strings.TrimSpace(os.Getenv("AUCTION_SEARCH_PROVIDER")))
 	dsn := strings.TrimSpace(os.Getenv("AUCTION_SEARCH_PG_DSN"))
+	esURL := strings.TrimSpace(os.Getenv("AUCTION_SEARCH_ES_URL"))
+	var keywords *searchindex.ElasticsearchIndex
+	if esURL != "" {
+		config := searchindex.ElasticsearchConfig{
+			BaseURL: esURL, Username: strings.TrimSpace(os.Getenv("AUCTION_SEARCH_ES_USERNAME")), Password: os.Getenv("AUCTION_SEARCH_ES_PASSWORD"),
+			WriteAlias:       getenv("AUCTION_SEARCH_ES_ALIAS", "auction-lots-current"),
+			RequestTimeout:   getenvDuration("AUCTION_SEARCH_ES_TIMEOUT", 3*time.Second),
+			MaxResponseBytes: int64(getenvInt("AUCTION_SEARCH_ES_MAX_RESPONSE_BYTES", 1<<20)),
+		}
+		index, err := newElasticsearchIndexWithStartupWait(ctx, config)
+		if err != nil {
+			log.Printf("buyer Elasticsearch retrieval disabled: %v", err)
+		} else {
+			keywords = index
+			log.Printf("buyer Elasticsearch retrieval enabled: alias=%s", config.WriteAlias)
+		}
+	}
 	if provider == "" && dsn == "" {
-		log.Printf("buyer search index disabled: pgvector dsn is not configured")
-		return nil, nil, nil
+		if keywords == nil {
+			log.Printf("buyer indexed search disabled: Elasticsearch URL and pgvector DSN are not configured")
+		}
+		return keywords, nil, nil
 	}
 	if provider != "" && provider != "pgvector" {
-		log.Printf("buyer search index disabled: unsupported provider %s", provider)
-		return nil, nil, nil
+		log.Printf("buyer vector retrieval disabled: unsupported provider %s", provider)
+		return keywords, nil, nil
+	}
+	if dsn == "" {
+		log.Printf("buyer vector retrieval disabled: pgvector DSN is not configured")
+		return keywords, nil, nil
 	}
 	embedder := searchindex.NewEmbeddingClientFromEnv(os.Getenv)
 	if !embedder.Configured() {
-		log.Printf("buyer search index disabled: embedding client is not configured")
-		return nil, nil, nil
+		log.Printf("buyer vector retrieval disabled: embedding client is not configured")
+		return keywords, nil, nil
 	}
 	indexCfg := searchindex.PGVectorConfig{
-		DSN:                 dsn,
-		EmbeddingModel:      embedder.Model(),
-		EmbeddingDimensions: embedder.Dimensions(),
-		MaxOpenConns:        getenvInt("AUCTION_SEARCH_PG_MAX_OPEN_CONNS", 5),
-		MaxIdleConns:        getenvInt("AUCTION_SEARCH_PG_MAX_IDLE_CONNS", 2),
-		ConnMaxLifetime:     getenvDuration("AUCTION_SEARCH_PG_CONN_MAX_LIFETIME", 30*time.Minute),
-		ConnMaxIdleTime:     getenvDuration("AUCTION_SEARCH_PG_CONN_MAX_IDLE_TIME", 2*time.Minute),
+		DSN:                   dsn,
+		EmbeddingProvider:     embedder.Provider(),
+		EmbeddingModel:        embedder.Model(),
+		EmbeddingModelVersion: embedder.ModelVersion(),
+		EmbeddingDimensions:   embedder.Dimensions(),
+		MaxOpenConns:          getenvInt("AUCTION_SEARCH_PG_MAX_OPEN_CONNS", 5),
+		MaxIdleConns:          getenvInt("AUCTION_SEARCH_PG_MAX_IDLE_CONNS", 2),
+		ConnMaxLifetime:       getenvDuration("AUCTION_SEARCH_PG_CONN_MAX_LIFETIME", 30*time.Minute),
+		ConnMaxIdleTime:       getenvDuration("AUCTION_SEARCH_PG_CONN_MAX_IDLE_TIME", 2*time.Minute),
 	}
 	index, err := newPGVectorIndexWithStartupWait(ctx, indexCfg)
 	if err != nil {
-		log.Printf("buyer search index disabled: %v", err)
-		return nil, nil, nil
+		log.Printf("buyer vector retrieval disabled: %v", err)
+		return keywords, nil, nil
 	}
-	worker := searchindex.NewSyncWorker(source, index, embedder, searchindex.SyncWorkerConfig{
-		Interval:        getenvDuration("AUCTION_SEARCH_SYNC_INTERVAL", 5*time.Minute),
-		BatchLimit:      getenvInt("AUCTION_SEARCH_SYNC_BATCH_LIMIT", 500),
-		HiddenRetention: getenvDuration("AUCTION_SEARCH_HIDDEN_RETENTION", searchindex.DefaultHiddenRetention),
-	})
-	log.Printf("buyer search index enabled: model=%s dimensions=%d", embedder.Model(), embedder.Dimensions())
-	return index, embedder, worker
+	log.Printf("buyer pgvector retrieval enabled: model=%s version=%s dimensions=%d", embedder.Model(), embedder.ModelVersion(), embedder.Dimensions())
+	return keywords, index, embedder
+}
+
+func newElasticsearchIndexWithStartupWait(ctx context.Context, cfg searchindex.ElasticsearchConfig) (*searchindex.ElasticsearchIndex, error) {
+	wait := getenvDuration("AUCTION_SEARCH_STARTUP_WAIT", 30*time.Second)
+	retryEvery := 2 * time.Second
+	deadline := time.Now().Add(wait)
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		index, err := searchindex.NewElasticsearchIndex(ctx, cfg)
+		if err == nil {
+			return index, nil
+		}
+		lastErr = err
+		if wait <= 0 || time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		log.Printf("buyer search waiting for Elasticsearch: attempt=%d error=%v", attempt, err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(retryEvery):
+		}
+	}
 }
 
 func newPGVectorIndexWithStartupWait(ctx context.Context, cfg searchindex.PGVectorConfig) (*searchindex.PGVectorIndex, error) {

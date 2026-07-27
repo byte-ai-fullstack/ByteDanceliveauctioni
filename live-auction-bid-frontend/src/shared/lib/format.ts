@@ -26,12 +26,6 @@ export function formatDateTimeText(value?: number | string | null, fallback = '�
   });
 }
 
-export function formatFullDateTimeText(value?: number | string | null, fallback = '未同步') {
-  const ts = Number(value || 0);
-  if (!Number.isFinite(ts) || ts <= 0) return fallback;
-  return new Date(ts).toLocaleString('zh-CN');
-}
-
 export function formatDurationText(seconds?: number | string | null) {
   const value = Number(seconds || 0);
   if (!Number.isFinite(value) || value <= 0) return '未设置';

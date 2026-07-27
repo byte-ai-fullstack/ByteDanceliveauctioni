@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Gavel, Package, Radio, RefreshCw, Search, ShieldAlert, ShieldCheck, Trophy, Wifi, X } from 'lucide-react';
-import { cancelLot, getRoomSnapshot, listAdminLots, settleLot, startLot, type AdminLotsQuery } from '../auction/api/auctionApi';
-import { CURRENT_LOT_STATUS_FILTERS, canSettleLot, isLiveLot, isPreStartCancellableLot, isQueueReadyLot, isRemovedFromCurrentQueueLot, isSettlementLot, lotStatusLabel, lotStatusTone, settlementOutcomeDisplay, uiStatusOfLot } from '../../entities/auction/model/auctionStatus';
+import { cancelLot, settleLot, startLot, type AdminLotsQuery } from '../auction/api/auctionApi';
+import { CURRENT_LOT_STATUS_FILTERS, canSettleLot, isLiveLot, isPreStartCancellableLot, isQueueReadyLot, isSettlementLot, lotStatusLabel, lotStatusTone, settlementOutcomeDisplay, uiStatusOfLot } from '../../entities/auction/model/auctionStatus';
 import type { Lot, RoomSnapshot } from '../../shared/api/types';
 import { resultMessage } from '../../shared/api/result';
 import { formatDateTimeText, formatDurationText, formatMoneyText } from '../../shared/lib/format';
 import { getLotLeftMs, formatAuctionLeftMs } from '../../shared/lib/time';
-import { AUCTION_REFRESH_EVENTS } from '../../shared/realtime/events';
+import { AppLink } from '../../shared/router/AppLink';
 import { roomSocketStatusLabel, useRoomSocket } from '../../shared/realtime/useRoomSocket';
-import { StudioBadge, StudioButton, StudioCard, StudioEmptyState, StudioErrorState, StudioField, StudioMetricCard, StudioPageHeader, StudioTableSkeleton, StudioToastViewport, useStudioToast } from '../../pages/host-console/components/studio-ui';
+import { StudioBadge, StudioButton, StudioCard, StudioEmptyState, StudioErrorState, StudioField, StudioMetricCard, StudioPageHeader, StudioTableSkeleton, StudioToastViewport } from '../../pages/host-console/components/studio-ui';
+import { useStudioToast } from '../../pages/host-console/components/studio-toast';
+import { useAuctionManagementPage } from './model/useAuctionManagementPage';
 
 const DEFAULT_PAGE_SIZE = 5;
 
@@ -18,47 +20,30 @@ type Props = {
 };
 
 export function AuctionManagementPage({ roomId, roomName = roomId }: Props) {
-  const [query, setQuery] = useState<AdminLotsQuery>({ page: 1, pageSize: DEFAULT_PAGE_SIZE, roomId, view: 'current' });
-  const [lots, setLots] = useState<Lot[]>([]);
-  const [total, setTotal] = useState(0);
-  const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [realtimeSnapshot, setRealtimeSnapshot] = useState<RoomSnapshot | null>(null);
+  const [actionError, setError] = useState('');
   const [selectedLot, setSelectedLot] = useState<Lot | null>(null);
   const [cancelTarget, setCancelTarget] = useState<Lot | null>(null);
   const { toasts, showToast } = useStudioToast();
-  const totalPages = Math.max(1, Math.ceil(total / (query.pageSize || DEFAULT_PAGE_SIZE)));
-
+  const { query, lots, total, snapshot: httpSnapshot, loading, error: queryError, totalPages, currentPage, syncLots: syncLotsQuery, updateQuery, goPrevPage, goNextPage, recoverSnapshot } = useAuctionManagementPage(roomId, DEFAULT_PAGE_SIZE);
+  const snapshot = realtimeSnapshot ?? httpSnapshot;
+  const error = actionError || queryError;
   const syncLots = async (nextQuery = query) => {
-    setLoading(true);
     setError('');
+    setRealtimeSnapshot(null);
     try {
-      const [page, nextSnapshot] = await Promise.all([
-        listAdminLots({ ...nextQuery, roomId, view: 'current', pageSize: DEFAULT_PAGE_SIZE }),
-        getRoomSnapshot(roomId),
-      ]);
-      setLots(page.lots);
-      setTotal(page.total);
-      setSnapshot(nextSnapshot);
-      setQuery((current) => ({ ...current, roomId, view: 'current', page: page.page, pageSize: DEFAULT_PAGE_SIZE }));
+      await syncLotsQuery(nextQuery);
     } catch (e) {
       const message = resultMessage(e);
       setError(message);
       showToast({ id: 'admin-lots-sync-failed', tone: 'danger', title: '本场队列同步失败', description: message });
-    } finally {
-      setLoading(false);
     }
-  };
-
-  const updateQuery = (patch: Partial<AdminLotsQuery>) => {
-    setQuery((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
   };
 
   const startAuction = async (lot: Lot) => {
     setError('');
     try {
       const updated = await startLot(lot.id);
-      setLots((current) => upsertLot(current, updated));
       showToast({ tone: 'success', title: '竞拍已开始', description: updated.title });
       await syncLots();
     } catch (e) {
@@ -79,7 +64,6 @@ export function AuctionManagementPage({ roomId, roomName = roomId }: Props) {
     }
     try {
       const updated = await settleLot(lot.id);
-      setLots((current) => upsertLot(current, updated));
       showToast({ tone: 'success', title: '已请求落锤成交', description: updated.title });
       await syncLots();
     } catch (e) {
@@ -93,8 +77,6 @@ export function AuctionManagementPage({ roomId, roomName = roomId }: Props) {
     setError('');
     try {
       const updated = await cancelLot(lot.id, reason);
-      setLots((current) => current.filter((item) => item.id !== updated.id));
-      setTotal((current) => Math.max(0, current - 1));
       setCancelTarget(null);
       showToast({ tone: 'success', title: '拍品已取消', description: updated.title });
       await syncLots();
@@ -107,18 +89,12 @@ export function AuctionManagementPage({ roomId, roomName = roomId }: Props) {
 
   const socket = useRoomSocket({
     roomId,
-    handledEventTypes: AUCTION_REFRESH_EVENTS,
     recoverSnapshot: async () => {
-      const next = await getRoomSnapshot(roomId);
-      setSnapshot(next);
+      const next = await recoverSnapshot();
+      setRealtimeSnapshot(next);
       return next;
     },
-    onEvent: (event) => {
-      if (event.snapshot) setSnapshot(event.snapshot);
-      if (event.lot) setLots((current) => upsertCurrentLot(current, event.lot as Lot));
-      if (AUCTION_REFRESH_EVENTS.has(event.type)) void syncLots();
-    },
-    onSnapshot: (nextSnapshot) => setSnapshot(nextSnapshot),
+    onSnapshot: (nextSnapshot) => setRealtimeSnapshot(nextSnapshot),
     onStatusChange: (status) => {
       if (status === 'connected') {
         setError((current) => current.includes('实时连接') ? '' : current);
@@ -130,13 +106,9 @@ export function AuctionManagementPage({ roomId, roomName = roomId }: Props) {
     },
   });
 
-  useEffect(() => { void syncLots({ ...query, roomId, view: 'current' }); }, [roomId]);
-  useEffect(() => { void syncLots(query); }, [query.page, query.status]);
-
   const currentLot = snapshot?.currentLot || lots.find(isLiveLot) || null;
   const nextLot = lots.find(isQueueReadyLot) || null;
   const wsState = roomSocketStatusLabel(socket.status);
-  const currentPage = query.page || 1;
   const pageStart = total ? ((currentPage - 1) * DEFAULT_PAGE_SIZE) + 1 : 0;
   const pageEnd = total ? Math.min(total, currentPage * DEFAULT_PAGE_SIZE) : 0;
   const metrics = useMemo(() => ({
@@ -152,14 +124,14 @@ export function AuctionManagementPage({ roomId, roomName = roomId }: Props) {
       <StudioPageHeader
         eyebrow="Admin lots"
         title="本场拍品队列"
-        actions={<><a className="studioButton studioButton-primary studioButton-md" href="/admin/auctions/create">添加拍品</a><a className="studioButton studioButton-secondary studioButton-md" href="/admin/auctions/history">历史记录</a><StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} loading={loading} onClick={() => void syncLots()}>{loading ? '同步中' : '同步队列'}</StudioButton></>}
+        actions={<><AppLink className="studioButton studioButton-primary studioButton-md" to="/admin/auctions/create">添加拍品</AppLink><AppLink className="studioButton studioButton-secondary studioButton-md" to="/admin/auctions/history">历史记录</AppLink><StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} loading={loading} onClick={() => void syncLots()}>{loading ? '同步中' : '同步队列'}</StudioButton></>}
       />
     </StudioCard>
     {error ? <div className="auctionMgmtNotice danger"><AlertTriangle size={16} />{error}</div> : null}
     <section className="realtimeSyncCapsule">
       <div><Wifi size={18} /><span>实时同步状态</span><StudioBadge tone={socket.status === 'connected' ? 'success' : socket.status === 'reconnecting' ? 'warning' : 'danger'}>{wsState}</StudioBadge></div>
       <div className="syncCapsuleMetrics"><span>当前直播间：<b>{roomId}</b></span><span>最近心跳：<b>{new Date().toLocaleTimeString('zh-CN', { hour12: false })}</b></span><span>重连次数：<b>{socket.reconnectCount}</b></span><span>当前竞拍：<b>{currentLot?.id || '无 LIVE'}</b></span></div>
-      <div><button type="button" onClick={() => void syncLots()}>重新同步</button><a href="/admin/realtime">实时诊断</a></div>
+      <div><button type="button" onClick={() => void syncLots()}>重新同步</button><AppLink to="/admin/realtime">实时诊断</AppLink></div>
     </section>
     <section className="queueTopCards">
       <QueueFocusCard lot={currentLot} snapshot={snapshot} onCancel={setCancelTarget} />
@@ -182,29 +154,20 @@ export function AuctionManagementPage({ roomId, roomName = roomId }: Props) {
         <StudioField label="状态"><select value={query.status || ''} onChange={(e) => updateQuery({ status: e.target.value as AdminLotsQuery['status'] })}>{CURRENT_LOT_STATUS_FILTERS.map((item) => <option key={item.label} value={item.value}>{item.label}</option>)}</select></StudioField>
         <StudioButton type="button" variant="primary" icon={<Search size={15} />} onClick={() => void syncLots({ ...query, page: 1 })}>查询</StudioButton>
         <div className="queuePager" aria-label="拍品队列分页">
-          <button type="button" disabled={currentPage <= 1 || loading} onClick={() => setQuery((current) => ({ ...current, page: Math.max(1, (current.page || 1) - 1) }))}><ChevronLeft size={15} /><span>上一页</span></button>
-          <button type="button" disabled={currentPage >= totalPages || loading} onClick={() => setQuery((current) => ({ ...current, page: (current.page || 1) + 1 }))}><span>下一页</span><ChevronRight size={15} /></button>
+          <button type="button" disabled={currentPage <= 1 || loading} onClick={goPrevPage}><ChevronLeft size={15} /><span>上一页</span></button>
+          <button type="button" disabled={currentPage >= totalPages || loading} onClick={goNextPage}><span>下一页</span><ChevronRight size={15} /></button>
         </div>
       </div>
     </StudioCard>
-    {loading ? <StudioTableSkeleton className="auctionMgmtSkeleton" rows={DEFAULT_PAGE_SIZE} columns={7} /> : error && !lots.length ? <StudioErrorState className="auctionMgmtEmpty" icon={<AlertTriangle size={40} />} title="本场拍品队列加载失败" description={error} action={<StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} onClick={() => void syncLots()}>重试加载</StudioButton>} /> : lots.length ? <section className="auctionQueueList" aria-label="本场拍品队列列表">{lots.map((lot, index) => <AuctionQueueRow key={lot.id} lot={lot} position={((currentPage - 1) * DEFAULT_PAGE_SIZE) + index + 1} currentLot={currentLot} snapshot={snapshot} onDetail={setSelectedLot} onCancel={setCancelTarget} onStart={startAuction} onSettle={settleAuction} />)}</section> : <StudioEmptyState icon={<Package size={34} />} title="暂无拍品" description="当前筛选条件下没有拍品，可以添加新拍品或清空筛选。" action={<a className="studioButton studioButton-primary studioButton-md" href="/admin/auctions/create">添加拍品</a>} />}
+    {loading ? <StudioTableSkeleton className="auctionMgmtSkeleton" rows={DEFAULT_PAGE_SIZE} columns={7} /> : error && !lots.length ? <StudioErrorState className="auctionMgmtEmpty" icon={<AlertTriangle size={40} />} title="本场拍品队列加载失败" description={error} action={<StudioButton type="button" variant="secondary" icon={<RefreshCw size={15} />} onClick={() => void syncLots()}>重试加载</StudioButton>} /> : lots.length ? <section className="auctionQueueList" aria-label="本场拍品队列列表">{lots.map((lot, index) => <AuctionQueueRow key={lot.id} lot={lot} position={((currentPage - 1) * DEFAULT_PAGE_SIZE) + index + 1} currentLot={currentLot} snapshot={snapshot} onDetail={setSelectedLot} onCancel={setCancelTarget} onStart={startAuction} onSettle={settleAuction} />)}</section> : <StudioEmptyState icon={<Package size={34} />} title="暂无拍品" description="当前筛选条件下没有拍品，可以添加新拍品或清空筛选。" action={<AppLink className="studioButton studioButton-primary studioButton-md" to="/admin/auctions/create">添加拍品</AppLink>} />}
     {selectedLot ? <AuctionDetailDrawer lot={selectedLot} snapshot={snapshot} onClose={() => setSelectedLot(null)} /> : null}
     {cancelTarget ? <CancelAuctionDialog lot={cancelTarget} onClose={() => setCancelTarget(null)} onConfirm={confirmCancel} /> : null}
   </section>;
 }
 
-function upsertLot(list: Lot[], lot: Lot) {
-  return list.some((item) => item.id === lot.id) ? list.map((item) => item.id === lot.id ? lot : item) : [lot, ...list];
-}
-
-function upsertCurrentLot(list: Lot[], lot: Lot) {
-  if (isRemovedFromCurrentQueueLot(lot)) return list.filter((item) => item.id !== lot.id);
-  return upsertLot(list, lot);
-}
-
 function QueueFocusCard({ lot, snapshot, onCancel }: { lot: Lot | null; snapshot: RoomSnapshot | null; onCancel: (lot: Lot) => void }) {
-  if (!lot) return <article className="queueTopCard current isEmpty"><header><span><Radio size={18} />当前竞拍</span><StudioBadge tone="neutral">空闲</StudioBadge></header><h3>当前没有正在拍</h3><p>可以从下一件拍品开始，或继续完善今日队列。</p><a className="studioButton studioButton-primary studioButton-sm" href="/admin/auctions/create">添加拍品</a></article>;
-  return <article className="queueTopCard current isLive"><header><span><Radio size={18} />当前竞拍</span><StudioBadge tone={lotStatusTone(lot.status)}>{lotStatusLabel(lot.status)}</StudioBadge></header><h3>{lot.title}</h3><div className="queuePriceLine"><span>当前价</span><b>{formatMoneyText(lot.currentPrice)}</b><small>{formatAuctionLeftMs(getLotLeftMs(lot, snapshot?.serverTimeUnixMs), 'queue')}</small></div><p>领先用户：{lot.leadingNickname || '暂无'} · 出价 {snapshot?.recentBids?.length || 0} 次</p><div className="queueTopActions"><a className="studioButton studioButton-primary studioButton-sm" href={`/admin/auctions/${lot.id}/control`}>进入中控台</a><button type="button" className="studioButton studioButton-danger studioButton-sm" onClick={() => onCancel(lot)}>异常取消</button></div></article>;
+  if (!lot) return <article className="queueTopCard current isEmpty"><header><span><Radio size={18} />当前竞拍</span><StudioBadge tone="neutral">空闲</StudioBadge></header><h3>当前没有正在拍</h3><p>可以从下一件拍品开始，或继续完善今日队列。</p><AppLink className="studioButton studioButton-primary studioButton-sm" to="/admin/auctions/create">添加拍品</AppLink></article>;
+  return <article className="queueTopCard current isLive"><header><span><Radio size={18} />当前竞拍</span><StudioBadge tone={lotStatusTone(lot.status)}>{lotStatusLabel(lot.status)}</StudioBadge></header><h3>{lot.title}</h3><div className="queuePriceLine"><span>当前价</span><b>{formatMoneyText(lot.currentPrice)}</b><small>{formatAuctionLeftMs(getLotLeftMs(lot, snapshot?.serverTimeUnixMs), 'queue')}</small></div><p>领先用户：{lot.leadingNickname || '暂无'} · 出价 {snapshot?.recentBids?.length || 0} 次</p><div className="queueTopActions"><AppLink className="studioButton studioButton-primary studioButton-sm" to={`/admin/auctions/${lot.id}/control`}>进入中控台</AppLink><button type="button" className="studioButton studioButton-danger studioButton-sm" onClick={() => onCancel(lot)}>异常取消</button></div></article>;
 }
 
 function NextLotCard({ lot, disabled, onStart }: { lot: Lot | null; disabled: boolean; onStart: (lot: Lot) => void }) {
@@ -221,7 +184,7 @@ function AuctionQueueRow({ lot, position, currentLot, snapshot, onDetail, onCanc
   return <article className={`queueRowCard ${isCurrent ? 'isCurrent' : ''} ${isNext ? 'isNext' : ''} ${status === '已取消' ? 'isCancelled' : ''}`} onClick={() => onDetail(lot)}>
     <div className="queueRowLeft"><span className="queueNo">#{String(position).padStart(2, '0')}</span><img src={lot.imageUrl || '/vite.svg'} alt={lot.title} /><div><h3>{lot.title}</h3><div className="queueTags"><StudioBadge tone={lotStatusTone(lot.status)}>{lotStatusLabel(lot.status)}</StudioBadge><span>竞拍 ID {lot.id}</span><span>规则 v{lot.version || 1}</span></div></div></div>
     <div className="queueRowMiddle"><span><b>状态进度：</b>{statusProgressText(lot, snapshot)}</span><span><b>开拍时间：</b>{formatDateTimeText(lot.startedAtUnixMs, '未开拍')}</span><span><b>起拍 / 加价：</b>{formatMoneyText(lot.rule.startPrice)} / {formatMoneyText(lot.rule.minIncrement)}</span><span><b>封顶 / 时长：</b>{formatMoneyText(lot.rule.capPrice)} / {formatDurationText(lot.rule.durationSeconds)}</span></div>
-    <div className="queueRowRight">{orderStateText(lot)}<div className="auctionRowActions" onClick={(e) => e.stopPropagation()}><button type="button" className="queueActionPlain" onClick={() => onDetail(lot)}>详情</button>{isQueueReadyLot(lot) ? <button type="button" className="queueActionPrimary" disabled={Boolean(currentLot)} onClick={() => void onStart(lot)}>开始竞拍</button> : null}{isLiveLot(lot) ? <><a className="queueActionPrimary" href={`/admin/auctions/${lot.id}/control`}>进入中控</a><button type="button" className="queueActionPrimary" disabled={!settleReady} title={settleReady ? '落锤成交' : '暂无有效出价，不能落锤成交'} onClick={() => void onSettle(lot)}>{settleReady ? '落锤成交' : '等待出价'}</button><button type="button" className="queueActionDanger danger" onClick={() => onCancel(lot)}>异常取消</button></> : null}{isPreStartCancellableLot(lot) ? <button type="button" className="queueActionDanger danger" onClick={() => onCancel(lot)}>取消拍品</button> : null}{isSettlementLot(lot) ? <a className="queueActionPrimary" href="/admin/orders">成交处理</a> : null}</div></div>
+    <div className="queueRowRight">{orderStateText(lot)}<div className="auctionRowActions" onClick={(e) => e.stopPropagation()}><button type="button" className="queueActionPlain" onClick={() => onDetail(lot)}>详情</button>{isQueueReadyLot(lot) ? <button type="button" className="queueActionPrimary" disabled={Boolean(currentLot)} onClick={() => void onStart(lot)}>开始竞拍</button> : null}{isLiveLot(lot) ? <><AppLink className="queueActionPrimary" to={`/admin/auctions/${lot.id}/control`}>进入中控</AppLink><button type="button" className="queueActionPrimary" disabled={!settleReady} title={settleReady ? '落锤成交' : '暂无有效出价，不能落锤成交'} onClick={() => void onSettle(lot)}>{settleReady ? '落锤成交' : '等待出价'}</button><button type="button" className="queueActionDanger danger" onClick={() => onCancel(lot)}>异常取消</button></> : null}{isPreStartCancellableLot(lot) ? <button type="button" className="queueActionDanger danger" onClick={() => onCancel(lot)}>取消拍品</button> : null}{isSettlementLot(lot) ? <AppLink className="queueActionPrimary" to="/admin/orders">成交处理</AppLink> : null}</div></div>
   </article>;
 }
 
