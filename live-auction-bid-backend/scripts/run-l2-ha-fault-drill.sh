@@ -46,8 +46,9 @@ wait_for_kafka() {
 produce_marker() {
   local service="$1"
   local phase="$2"
+  local timeout_seconds="${L2_HA_PRODUCER_TIMEOUT_SECONDS:-30}"
   printf '%s:%s\n' "$drill_id" "$phase" |
-    "${compose[@]}" exec -T "$service" \
+    timeout "${timeout_seconds}s" "${compose[@]}" exec -T "$service" \
     /opt/kafka/bin/kafka-console-producer.sh \
     --bootstrap-server 127.0.0.1:9092 \
     --topic auction.dlq.v1 \
@@ -127,7 +128,7 @@ wait_for_nats_routes() {
 }
 
 "${compose[@]}" config --quiet
-"${compose[@]}" up -d --wait "${all_services[@]}"
+"${compose[@]}" up -d --wait --wait-timeout "${L2_HA_STARTUP_TIMEOUT_SECONDS:-180}" "${all_services[@]}"
 "${compose[@]}" run --rm kafka-init
 
 topic_description="$("${compose[@]}" exec -T kafka-1 \
