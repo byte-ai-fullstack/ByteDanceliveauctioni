@@ -61,6 +61,20 @@ produce_marker() {
     --producer-property "client.id=l2-ha-$phase"
 }
 
+produce_marker_eventually() {
+  local service="$1"
+  local phase="$2"
+  local attempt
+  for attempt in $(seq 1 "${L2_HA_PRODUCER_ATTEMPTS:-6}"); do
+    if produce_marker "$service" "$phase"; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Kafka did not accept $phase after bounded failover retries" >&2
+  return 1
+}
+
 assert_kafka_markers() {
   local consumer_log
   consumer_log="$(mktemp)"
@@ -142,7 +156,7 @@ rg -q 'min.insync.replicas=2' <<<"$topic_config"
 produce_marker kafka-1 baseline
 "${compose[@]}" stop kafka-1 >/dev/null
 wait_for_kafka kafka-2
-produce_marker kafka-2 one-broker-down
+produce_marker_eventually kafka-2 one-broker-down
 
 "${compose[@]}" stop kafka-2 >/dev/null
 kafka_failure_log="$(mktemp)"
